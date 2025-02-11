@@ -17,7 +17,9 @@ use meshopt::{
     simplify_with_attributes_and_locks, Meshlets, SimplifyOptions, VertexDataAdapter, VertexStream,
 };
 use metis::{option::Opt, Graph};
+use obvhs::{aabb::Aabb, cwbvh::builder::build_cwbvh, Boundable, BvhBuildParams};
 use smallvec::SmallVec;
+use std::time::Duration;
 use thiserror::Error;
 
 // Aim to have 8 meshlets per group
@@ -111,9 +113,13 @@ impl MeshletMesh {
 
         let mut vertex_locks = vec![false; vertices.vertex_count];
 
+        let mut lods = Vec::new();
+
         // Build further LODs
         let mut simplification_queue = 0..meshlets.len();
         while simplification_queue.len() > 1 {
+            let mut lod = Vec::new();
+
             // For each meshlet build a list of connected meshlets (meshlets that share a vertex)
             let connected_meshlets_per_meshlet = find_connected_meshlets(
                 simplification_queue.clone(),
@@ -140,8 +146,32 @@ impl MeshletMesh {
 
             let next_lod_start = meshlets.len();
             for group_meshlets in groups.into_iter() {
+                let mut min = Vec3::MAX;
+                let mut max = Vec3::MIN;
+                for meshlet_id in &group_meshlets {
+                    for vertex_id in meshlets.get(*meshlet_id).vertices.iter() {
+                        let vertex_id_byte = *vertex_id as usize * vertex_stride;
+                        let vertex_data =
+                            &vertex_buffer[vertex_id_byte..(vertex_id_byte + vertex_stride)];
+                        let position = Vec3::from_slice(bytemuck::cast_slice(&vertex_data[0..12]));
+
+                        min = min.min(position);
+                        max = max.max(position);
+                    }
+                }
+                let mut cull_node = CullNode {
+                    aabb: Aabb::new(min.into(), max.into()),
+                    meshlets: group_meshlets.clone(),
+                    lod_sphere: MeshletBoundingSphere {
+                        center: Vec3::ZERO,
+                        radius: 0.0,
+                    },
+                    error: f32::MAX,
+                };
+
                 // If the group only has a single meshlet we can't simplify it
                 if group_meshlets.len() == 1 {
+                    lod.push(cull_node);
                     continue;
                 }
 
@@ -155,6 +185,7 @@ impl MeshletMesh {
                     &vertex_locks,
                 ) else {
                     // Couldn't simplify the group enough
+                    lod.push(cull_node);
                     continue;
                 };
 
@@ -165,6 +196,9 @@ impl MeshletMesh {
                     &mut bounding_spheres,
                     &mut simplification_errors,
                 );
+
+                cull_node.error = group_error.into();
+                cull_node.lod_sphere = group_bounding_sphere;
 
                 // Build new meshlets using the simplified group
                 let new_meshlets_count = split_simplified_group_into_new_meshlets(
@@ -196,8 +230,18 @@ impl MeshletMesh {
                 );
             }
 
+            lods.push(lod);
+
             // Set simplification queue to the list of newly created meshlets
             simplification_queue = next_lod_start..meshlets.len();
+        }
+
+        // TODO: Add last LOD level
+        lods.push(vec![todo!()]);
+
+        // TODO: Create BVHs, merge, and propogate error
+        for lod in lods {
+            let bvh = build_cwbvh(&lod, BvhBuildParams::slow_build(), &mut Duration::default());
         }
 
         // Copy vertex attributes per meshlet and compress
@@ -638,6 +682,7 @@ fn build_and_compress_per_meshlet_vertex_data(
         vertex_normals.push(pack2x16snorm(octahedral_encode(normal)));
 
         // Quantize position to a fixed-point IVec3
+        // TODO: Might need AABBs too?
         let quantized_position = (position * quantization_factor + 0.5).as_ivec3();
         quantized_positions[i] = quantized_position;
 
@@ -728,4 +773,17 @@ pub enum MeshToMeshletMeshConversionError {
     WrongMeshVertexAttributes,
     #[error("Mesh has no indices")]
     MeshMissingIndices,
+}
+
+struct CullNode {
+    aabb: Aabb,
+    meshlets: SmallVec<[usize; TARGET_MESHLETS_PER_GROUP]>,
+    lod_sphere: MeshletBoundingSphere,
+    error: f32,
+}
+
+impl Boundable for CullNode {
+    fn aabb(&self) -> Aabb {
+        self.aabb
+    }
 }
