@@ -18,7 +18,7 @@ use meshopt::{
 };
 use metis::{option::Opt, Graph};
 use obvhs::{aabb::Aabb, cwbvh::builder::build_cwbvh, Boundable, BvhBuildParams};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -161,7 +161,7 @@ impl MeshletMesh {
                 }
                 let mut cull_node = CullNode {
                     aabb: Aabb::new(min.into(), max.into()),
-                    meshlets: group_meshlets.clone(),
+                    children: group_meshlets.clone(),
                     lod_sphere: MeshletBoundingSphere {
                         center: Vec3::ZERO,
                         radius: 0.0,
@@ -236,12 +236,42 @@ impl MeshletMesh {
             simplification_queue = next_lod_start..meshlets.len();
         }
 
-        // TODO: Add last LOD level
-        lods.push(vec![todo!()]);
+        if simplification_queue.len() == 1 {
+            let meshlet_id = simplification_queue.last().unwrap();
+            let mut min = Vec3::MAX;
+            let mut max = Vec3::MIN;
+            for vertex_id in meshlets.get(meshlet_id).vertices.iter() {
+                let vertex_id_byte = *vertex_id as usize * vertex_stride;
+                let vertex_data = &vertex_buffer[vertex_id_byte..(vertex_id_byte + vertex_stride)];
+                let position = Vec3::from_slice(bytemuck::cast_slice(&vertex_data[0..12]));
 
-        // TODO: Create BVHs, merge, and propogate error
+                min = min.min(position);
+                max = max.max(position);
+            }
+            let cull_node = CullNode {
+                aabb: Aabb::new(min.into(), max.into()),
+                children: smallvec![meshlet_id],
+                lod_sphere: MeshletBoundingSphere {
+                    center: Vec3::ZERO,
+                    radius: 0.0,
+                },
+                error: f32::MAX,
+            };
+            lods.push(vec![cull_node]);
+        }
+
+        // TODO: Create BVHs per LOD, merge into one BVH, and enforce error/sphere monotonicity down the tree
+        let mut culling_bvh = Vec::new();
         for lod in lods {
-            let bvh = build_cwbvh(&lod, BvhBuildParams::slow_build(), &mut Duration::default());
+            let lod_bvh = build_cwbvh(&lod, BvhBuildParams::slow_build(), &mut Duration::default());
+            for node in lod_bvh.nodes {
+                culling_bvh.push(CullNode {
+                    aabb: node.aabb(),
+                    children: todo!(),
+                    lod_sphere: todo!(),
+                    error: todo!(),
+                });
+            }
         }
 
         // Copy vertex attributes per meshlet and compress
@@ -682,7 +712,7 @@ fn build_and_compress_per_meshlet_vertex_data(
         vertex_normals.push(pack2x16snorm(octahedral_encode(normal)));
 
         // Quantize position to a fixed-point IVec3
-        // TODO: Might need AABBs too?
+        // TODO: Might need to quantize AABBs too?
         let quantized_position = (position * quantization_factor + 0.5).as_ivec3();
         quantized_positions[i] = quantized_position;
 
@@ -777,8 +807,12 @@ pub enum MeshToMeshletMeshConversionError {
 
 struct CullNode {
     aabb: Aabb,
-    meshlets: SmallVec<[usize; TARGET_MESHLETS_PER_GROUP]>,
+    // List of child nodes (either other interior nodes, or meshlet IDs if a leaf node)
+    // TODO: Store as (start_id, count) on the GPU
+    children: SmallVec<[usize; TARGET_MESHLETS_PER_GROUP]>,
+    // Parent sphere for interior nodes, self sphere for leaf meshlet nodes
     lod_sphere: MeshletBoundingSphere,
+    // Parent error for interior nodes, self error for leaf meshlet nodes
     error: f32,
 }
 
