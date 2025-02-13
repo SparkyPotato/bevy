@@ -260,19 +260,53 @@ impl MeshletMesh {
             lods.push(vec![cull_node]);
         }
 
-        // TODO: Create BVHs per LOD, merge into one BVH, and enforce error/sphere monotonicity down the tree
-        let mut culling_bvh = Vec::new();
-        for lod in lods {
-            let lod_bvh = build_cwbvh(&lod, BvhBuildParams::slow_build(), &mut Duration::default());
-            for node in lod_bvh.nodes {
-                culling_bvh.push(CullNode {
+        for lod in &mut lods {
+            let bvh_build_params = BvhBuildParams {
+                max_prims_per_leaf: 1,
+                ..BvhBuildParams::slow_build()
+            };
+            let lod_bvh = build_cwbvh(&lod, bvh_build_params, &mut Duration::default());
+
+            let mut stack1 = Vec::with_capacity(lod_bvh.nodes.len());
+            let mut stack2 = Vec::with_capacity(lod_bvh.nodes.len());
+            stack1.push(0);
+            while let Some(node_id) = stack1.pop() {
+                stack2.push(node_id);
+                let node = lod_bvh.nodes[node_id];
+                for i in 0..8 {
+                    if !node.is_child_empty(i) {
+                        if !node.is_leaf(i) {
+                            stack1.push(node.child_node_index(i) as usize);
+                        } else {
+                            // node.child_primitives(i) points to a single item in lod_bvh.primitives()
+                            // that points to an item in lod (an existing CullNode)
+                            //
+                            // What to do?
+                        }
+                    }
+                }
+            }
+
+            lod.reserve(lod_bvh.nodes.len());
+            for node_id in stack2.into_iter().rev() {
+                let node = lod_bvh.nodes[node_id];
+                let child_count = (0..8)
+                    .into_iter()
+                    .filter(|i| !node.is_child_empty(*i))
+                    .count();
+
+                let child_base_index = node.child_base_idx as usize;
+                let children = child_base_index..(child_base_index + child_count);
+                lod.push(CullNode {
                     aabb: node.aabb(),
-                    children: todo!(),
-                    lod_sphere: todo!(),
-                    error: todo!(),
+                    children: children.into_iter().collect(),
+                    lod_sphere: todo!("Merged child spheres"),
+                    error: todo!("Max of child errors"),
                 });
             }
         }
+
+        // TODO: Merge lod_bvhs into one single bvh with a new root node
 
         // Copy vertex attributes per meshlet and compress
         let mut vertex_positions = BitVec::<u32, Lsb0>::new();
