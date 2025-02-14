@@ -277,11 +277,6 @@ impl MeshletMesh {
                     if !node.is_child_empty(i) {
                         if !node.is_leaf(i) {
                             stack1.push(node.child_node_index(i) as usize);
-                        } else {
-                            // node.child_primitives(i) points to a single item in lod_bvh.primitives()
-                            // that points to an item in lod (an existing CullNode)
-                            //
-                            // What to do?
                         }
                     }
                 }
@@ -294,6 +289,10 @@ impl MeshletMesh {
                     .into_iter()
                     .filter(|i| !node.is_child_empty(*i))
                     .count();
+
+                // TODO: get all child lod spheres and errors
+                // If child leaf, check primitive and pull from `lod`
+                // If child not leaf, how to get child CullNode?
 
                 let child_base_index = node.child_base_idx as usize;
                 let children = child_base_index..(child_base_index + child_count);
