@@ -199,6 +199,7 @@ impl MeshletMesh {
 
                 cull_node.error = group_error.into();
                 cull_node.lod_sphere = group_bounding_sphere;
+                lod.push(cull_node);
 
                 // Build new meshlets using the simplified group
                 let new_meshlets_count = split_simplified_group_into_new_meshlets(
