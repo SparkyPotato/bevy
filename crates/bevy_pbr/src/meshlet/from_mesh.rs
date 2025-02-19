@@ -9,7 +9,7 @@ use bevy_render::{
     render_resource::PrimitiveTopology,
 };
 use bitvec::{order::Lsb0, vec::BitVec, view::BitView};
-use core::{iter, ops::Range};
+use core::{iter, ops::Range, time::Duration};
 use half::f16;
 use itertools::Itertools;
 use meshopt::{
@@ -19,7 +19,6 @@ use meshopt::{
 use metis::{option::Opt, Graph};
 use obvhs::{aabb::Aabb, cwbvh::builder::build_cwbvh, Boundable, BvhBuildParams};
 use smallvec::{smallvec, SmallVec};
-use std::time::Duration;
 use thiserror::Error;
 
 // Aim to have 8 meshlets per group
@@ -262,51 +261,82 @@ impl MeshletMesh {
         }
 
         for lod in &mut lods {
+            if lod.len() == 1 {
+                continue;
+            }
+
             let bvh_build_params = BvhBuildParams {
                 max_prims_per_leaf: 1,
                 ..BvhBuildParams::slow_build()
             };
             let lod_bvh = build_cwbvh(&lod, bvh_build_params, &mut Duration::default());
 
-            let mut stack1 = Vec::with_capacity(lod_bvh.nodes.len());
-            let mut stack2 = Vec::with_capacity(lod_bvh.nodes.len());
-            stack1.push(0);
-            while let Some(node_id) = stack1.pop() {
-                stack2.push(node_id);
+            let mut traversal_stack = Vec::with_capacity(lod_bvh.nodes.len());
+            let mut interior_nodes = Vec::with_capacity(lod_bvh.nodes.len());
+            traversal_stack.push(0);
+            while let Some(node_id) = traversal_stack.pop() {
+                interior_nodes.push(node_id);
                 let node = lod_bvh.nodes[node_id];
                 for i in 0..8 {
                     if !node.is_child_empty(i) {
                         if !node.is_leaf(i) {
-                            stack1.push(node.child_node_index(i) as usize);
+                            traversal_stack.push(node.child_node_index(i) as usize);
                         }
                     }
                 }
             }
 
             lod.reserve(lod_bvh.nodes.len());
-            for node_id in stack2.into_iter().rev() {
+            let mut bvh_to_cull_node = HashMap::with_capacity(lod_bvh.nodes.len());
+            for node_id in interior_nodes.into_iter().rev() {
                 let node = lod_bvh.nodes[node_id];
-                let child_count = (0..8)
-                    .into_iter()
+
+                let children = (0..8)
                     .filter(|i| !node.is_child_empty(*i))
-                    .count();
+                    .map(|i| {
+                        if node.is_leaf(i) {
+                            lod_bvh.primitive_indices[node.child_primitives(i).0 as usize] as usize
+                        } else {
+                            bvh_to_cull_node[&(node.child_node_index(i) as usize)]
+                        }
+                    })
+                    .collect::<SmallVec<[usize; TARGET_MESHLETS_PER_GROUP]>>();
 
-                // TODO: get all child lod spheres and errors
-                // If child leaf, check primitive and pull from `lod`
-                // If child not leaf, how to get child CullNode?
+                let mut lod_sphere = MeshletBoundingSphere {
+                    center: Vec3::ZERO,
+                    radius: 0.0,
+                };
+                let mut error: f32 = 0.0;
 
-                let child_base_index = node.child_base_idx as usize;
-                let children = child_base_index..(child_base_index + child_count);
+                let mut weight = 0.0;
+                for cull_node_id in &children {
+                    let child_sphere = lod[*cull_node_id].lod_sphere;
+                    lod_sphere.center += child_sphere.center * child_sphere.radius;
+                    weight += child_sphere.radius;
+                }
+                lod_sphere.center /= weight;
+
+                for cull_node_id in &children {
+                    let child_sphere = lod[*cull_node_id].lod_sphere;
+                    let d = child_sphere.center.distance(lod_sphere.center);
+                    lod_sphere.radius = lod_sphere.radius.max(child_sphere.radius + d);
+                }
+
+                for cull_node_id in &children {
+                    error = error.max(lod[*cull_node_id].error);
+                }
+
+                bvh_to_cull_node.insert(node_id, lod.len());
                 lod.push(CullNode {
                     aabb: node.aabb(),
-                    children: children.into_iter().collect(),
-                    lod_sphere: todo!("Merged child spheres"),
-                    error: todo!("Max of child errors"),
+                    children,
+                    lod_sphere,
+                    error,
                 });
             }
         }
 
-        // TODO: Merge lod_bvhs into one single bvh with a new root node
+        // TODO: Merge lod_bvhs into one single bvh with a new root node (each root is the last node in the LOD level)
 
         // Copy vertex attributes per meshlet and compress
         let mut vertex_positions = BitVec::<u32, Lsb0>::new();
