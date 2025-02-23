@@ -112,12 +112,13 @@ impl MeshletMesh {
 
         let mut vertex_locks = vec![false; vertices.vertex_count];
 
+        let mut cull_nodes = Vec::new();
         let mut lods = Vec::new();
 
         // Build further LODs
         let mut simplification_queue = 0..meshlets.len();
         while simplification_queue.len() > 1 {
-            let mut lod = Vec::new();
+            let start_node = cull_nodes.len();
 
             // For each meshlet build a list of connected meshlets (meshlets that share a vertex)
             let connected_meshlets_per_meshlet = find_connected_meshlets(
@@ -158,6 +159,7 @@ impl MeshletMesh {
                         max = max.max(position);
                     }
                 }
+                // TODO: Use this to generate `CullNodes` for each meshlet
                 let mut cull_node = CullNode {
                     aabb: Aabb::new(min.into(), max.into()),
                     children: group_meshlets.clone(),
@@ -170,7 +172,7 @@ impl MeshletMesh {
 
                 // If the group only has a single meshlet we can't simplify it
                 if group_meshlets.len() == 1 {
-                    lod.push(cull_node);
+                    cull_nodes.push(cull_node);
                     continue;
                 }
 
@@ -184,7 +186,7 @@ impl MeshletMesh {
                     &vertex_locks,
                 ) else {
                     // Couldn't simplify the group enough
-                    lod.push(cull_node);
+                    cull_nodes.push(cull_node);
                     continue;
                 };
 
@@ -198,7 +200,7 @@ impl MeshletMesh {
 
                 cull_node.error = group_error.into();
                 cull_node.lod_sphere = group_bounding_sphere;
-                lod.push(cull_node);
+                cull_nodes.push(cull_node);
 
                 // Build new meshlets using the simplified group
                 let new_meshlets_count = split_simplified_group_into_new_meshlets(
@@ -230,7 +232,7 @@ impl MeshletMesh {
                 );
             }
 
-            lods.push(lod);
+            lods.push(start_node..cull_nodes.len());
 
             // Set simplification queue to the list of newly created meshlets
             simplification_queue = next_lod_start..meshlets.len();
@@ -257,11 +259,16 @@ impl MeshletMesh {
                 },
                 error: f32::MAX,
             };
-            lods.push(vec![cull_node]);
+
+            let i = cull_nodes.len();
+            cull_nodes.push(cull_node);
+            lods.push(i..i + 1);
         }
 
-        for lod in &mut lods {
+        let mut root_indices = Vec::with_capacity(lods.len());
+        for lod in lods {
             if lod.len() == 1 {
+                root_indices.push(lod.start);
                 continue;
             }
 
@@ -269,7 +276,11 @@ impl MeshletMesh {
                 max_prims_per_leaf: 1,
                 ..BvhBuildParams::slow_build()
             };
-            let lod_bvh = build_cwbvh(&lod, bvh_build_params, &mut Duration::default());
+            let lod_bvh = build_cwbvh(
+                &cull_nodes[lod.clone()],
+                bvh_build_params,
+                &mut Duration::default(),
+            );
 
             let mut traversal_stack = Vec::with_capacity(lod_bvh.nodes.len());
             let mut interior_nodes = Vec::with_capacity(lod_bvh.nodes.len());
@@ -286,7 +297,7 @@ impl MeshletMesh {
                 }
             }
 
-            lod.reserve(lod_bvh.nodes.len());
+            cull_nodes.reserve(lod_bvh.nodes.len());
             let mut bvh_to_cull_node = HashMap::with_capacity(lod_bvh.nodes.len());
             for node_id in interior_nodes.into_iter().rev() {
                 let node = lod_bvh.nodes[node_id];
@@ -295,48 +306,29 @@ impl MeshletMesh {
                     .filter(|i| !node.is_child_empty(*i))
                     .map(|i| {
                         if node.is_leaf(i) {
-                            lod_bvh.primitive_indices[node.child_primitives(i).0 as usize] as usize
+                            lod.start
+                                + lod_bvh.primitive_indices[node.child_primitives(i).0 as usize]
+                                    as usize
                         } else {
                             bvh_to_cull_node[&(node.child_node_index(i) as usize)]
                         }
                     })
                     .collect::<SmallVec<[usize; TARGET_MESHLETS_PER_GROUP]>>();
 
-                let mut lod_sphere = MeshletBoundingSphere {
-                    center: Vec3::ZERO,
-                    radius: 0.0,
-                };
-                let mut error: f32 = 0.0;
-
-                let mut weight = 0.0;
-                for cull_node_id in &children {
-                    let child_sphere = lod[*cull_node_id].lod_sphere;
-                    lod_sphere.center += child_sphere.center * child_sphere.radius;
-                    weight += child_sphere.radius;
-                }
-                lod_sphere.center /= weight;
-
-                for cull_node_id in &children {
-                    let child_sphere = lod[*cull_node_id].lod_sphere;
-                    let d = child_sphere.center.distance(lod_sphere.center);
-                    lod_sphere.radius = lod_sphere.radius.max(child_sphere.radius + d);
-                }
-
-                for cull_node_id in &children {
-                    error = error.max(lod[*cull_node_id].error);
-                }
-
-                bvh_to_cull_node.insert(node_id, lod.len());
-                lod.push(CullNode {
-                    aabb: node.aabb(),
-                    children,
-                    lod_sphere,
-                    error,
-                });
+                bvh_to_cull_node.insert(node_id, cull_nodes.len());
+                cull_nodes.push(merge_cull_nodes(&cull_nodes, Some(node.aabb()), &children));
             }
+
+            // The last node visited above is the root
+            // TODO: If the root is not completely full, maybe we should ignore it and add its
+            // children?
+            root_indices.push(cull_nodes.len() - 1);
         }
 
-        // TODO: Merge lod_bvhs into one single bvh with a new root node (each root is the last node in the LOD level)
+        // The LOD errors are in ascending order, but since max error is stored, they should be
+        // reversed before generating the tree.
+        root_indices.reverse();
+        let root = compute_lod_tree(&mut cull_nodes, &root_indices);
 
         // Copy vertex attributes per meshlet and compress
         let mut vertex_positions = BitVec::<u32, Lsb0>::new();
@@ -737,6 +729,91 @@ fn split_simplified_group_into_new_meshlets(
         }));
 
     new_meshlets_count
+}
+
+fn merge_cull_nodes(cull_nodes: &[CullNode], aabb: Option<Aabb>, nodes: &[usize]) -> CullNode {
+    let mut lod_sphere = MeshletBoundingSphere {
+        center: Vec3::ZERO,
+        radius: 0.0,
+    };
+    let mut error: f32 = 0.0;
+
+    let mut weight = 0.0;
+    for &cull_node_id in nodes {
+        let child_sphere = cull_nodes[cull_node_id].lod_sphere;
+        lod_sphere.center += child_sphere.center * child_sphere.radius;
+        weight += child_sphere.radius;
+    }
+    lod_sphere.center /= weight;
+
+    for &cull_node_id in nodes {
+        let child_sphere = cull_nodes[cull_node_id].lod_sphere;
+        let d = child_sphere.center.distance(lod_sphere.center);
+        lod_sphere.radius = lod_sphere.radius.max(child_sphere.radius + d);
+    }
+
+    for &cull_node_id in nodes {
+        error = error.max(cull_nodes[cull_node_id].error);
+    }
+
+    let aabb = aabb.unwrap_or_else(|| {
+        let mut a = Aabb::INVALID;
+        for &cull_node_id in nodes {
+            a = a.union(&cull_nodes[cull_node_id].aabb);
+        }
+        a
+    });
+
+    CullNode {
+        aabb,
+        children: nodes.iter().copied().collect(),
+        lod_sphere,
+        error,
+    }
+}
+
+fn compute_lod_tree(cull_nodes: &mut Vec<CullNode>, nodes: &[usize]) -> usize {
+    let count = nodes.len();
+    if count == 1 {
+        nodes[0]
+    } else if count <= 8 {
+        let i = cull_nodes.len();
+        cull_nodes.push(merge_cull_nodes(cull_nodes, None, nodes));
+        i
+    } else {
+        // We need to split the nodes into 8 groups, with the smallest possible tree depth.
+        // Additionally, no child should be more than one level deeper than the others.
+        // At `l` levels, we can fit upto 8^l nodes.
+        // The `max_child_size` is the largest power of 8 <= `count` (any larger and we'd have
+        // unfilled nodes).
+        // The `min_child_size` is thus 1 level (8 times) smaller.
+        // After distributing `min_child_size` to all children, we have distributed
+        // `min_child_size * 8` nodes (== `max_child_size`).
+        // The remaining nodes are then distributed left to right.
+        let max_child_size = 1 << (count.ilog2() / 3) * 3;
+        let min_child_size = max_child_size >> 3;
+        let max_extra_per_node = max_child_size - min_child_size;
+        let mut extra = count - max_child_size; // 8 * min_child_size
+        let splits: [usize; 8] = std::array::from_fn(|_| {
+            let size = extra.min(max_extra_per_node);
+            extra -= size;
+            min_child_size + size
+        });
+
+        let mut offset = 0;
+        let children: SmallVec<[usize; TARGET_MESHLETS_PER_GROUP]> = splits
+            .into_iter()
+            .map(|size| {
+                let i = compute_lod_tree(cull_nodes, &nodes[offset..(offset + size)]);
+                offset += size;
+                i
+            })
+            .collect();
+
+        let i = cull_nodes.len();
+        cull_nodes.push(merge_cull_nodes(cull_nodes, None, &children));
+        i as _
+    }
 }
 
 fn build_and_compress_per_meshlet_vertex_data(
