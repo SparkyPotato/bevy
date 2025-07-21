@@ -26,7 +26,6 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_center = vec2<f32>(global_id.xy) + 0.5;
     let jitter = rand_vec2f(&rng) - 0.5;
     let pixel_uv = (pixel_center + jitter) / view.viewport.zw;
-    let use_light_tree = pixel_uv.x < 0.5;
     let pixel_ndc = (pixel_uv * 2.0) - 1.0;
     let primary_ray_target = view.world_from_clip * vec4(pixel_ndc.x, -pixel_ndc.y, 1.0, 1.0);
     var ray_origin = view.world_position;
@@ -48,13 +47,8 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             if ray_t_min == 0.0 { radiance = ray_hit.material.emissive; }
 
             // Sample direct lighting
-            if use_light_tree {
-                let direct_lighting = sample_with_light_tree(ray_hit.world_position, ray_hit.world_normal, &rng);
-                radiance += throughput * diffuse_brdf * direct_lighting.radiance * direct_lighting.inverse_pdf;
-            } else {
-                let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, &rng);
-                radiance += throughput * diffuse_brdf * direct_lighting.radiance * direct_lighting.inverse_pdf;
-            }
+            let direct_lighting = sample_with_light_tree(ray_hit.world_position, ray_hit.world_normal, &rng);
+            radiance += throughput * diffuse_brdf * direct_lighting.radiance * direct_lighting.inverse_pdf;
 
             // Sample new ray direction from the material BRDF for next bounce
             ray_direction = sample_cosine_hemisphere(ray_hit.world_normal, &rng);

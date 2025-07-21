@@ -633,10 +633,10 @@ struct GpuLightTreeNode {
 
 // [Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting, AMD, 2024]
 fn axis_to_vmf(axis: Vec3) -> (Vec3, f32) {
-    let len = axis.length();
+    let len = axis.length().clamp(0.0, 1.0);
     let len2 = len * len;
     let len3 = len2 * len;
-    let sharpness = (3.0 * len - len3) / (1.0 - len2);
+    let sharpness = ((3.0 * len - len3) / (1.0 - len2)).min(2.19902e+12);
     let axis = axis.normalize_or_zero();
     (axis, sharpness)
 }

@@ -245,7 +245,11 @@ fn sample_light_tree(rng_sample: f32, ray_origin: vec3<f32>, ray_origin_world_no
     for (var i = 0u; i < 32u; i++) {
         let left_w = weight_light(node.left, ray_origin, ray_origin_world_normal);
         let right_w = weight_light(node.right, ray_origin, ray_origin_world_normal);
-        let left_p = left_w / (left_w + right_w);
+        let w_sum = left_w + right_w;
+        if w_sum < 0.0001 {
+            return LightTreeSample(0, 0.0);
+        }
+        let left_p = left_w / w_sum;
         let right_p = 1.0 - left_p;
         if p < left_p {
             inverse_pdf /= left_p;
@@ -299,8 +303,8 @@ fn sg_product(axis1: vec3<f32>, sharpness1: f32, axis2: vec3<f32>, sharpness2: f
 
     let d = axis1 - axis2;
     let len2 = dot(d, d);
-    let log_amplitude = -sharpness1 * sharpness2 * len2 / (sharpness + sharpness1 + sharpness2);
-    return SgLobe(axis / sharpness, sharpness, log_amplitude);
+    let log_amplitude = -sharpness1 * sharpness2 * len2 / max(sharpness + sharpness1 + sharpness2, 1.175494351e-38);
+    return SgLobe(axis / max(sharpness, 1.175494351e-38), sharpness, log_amplitude);
 }
 
 // [Tokuyoshi et al. 2024 "Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting (Supplementary
@@ -315,7 +319,7 @@ fn sg_clamped_cosine_product_integral_over_pi(cosine: f32, sharpness: f32) -> f3
 	let tz = t * cosine;
 
 	let INV_SQRTPI = 0.56418958354775628694807945156077;  // = 1/sqrt(pi).
-	let CLAMPING_THRESHOLD = 0.5 * 1e-5;				  // Set zero if a precise erfc function is available.
+	let CLAMPING_THRESHOLD = 0.5 * 1.192092896e-07;		  // Set zero if a precise erfc function is available.
 	let lerpFactor =
 		saturate(max(0.5 * (cosine * erfc(-tz) + erfc(t)) -
 						 0.5 * INV_SQRTPI * exp(-tz * tz) * expm1(t * t * (cosine * cosine - 1.0)) / t,
