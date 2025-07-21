@@ -1,6 +1,6 @@
 mod binder;
-mod blas;
 mod extract;
+mod scene;
 mod types;
 
 pub use binder::RaytracingSceneBindings;
@@ -19,11 +19,12 @@ use bevy_render::{
     render_asset::prepare_assets,
     render_resource::BufferUsages,
     renderer::RenderDevice,
+    texture::GpuImage,
     ExtractSchedule, Render, RenderApp, RenderSystems,
 };
 use binder::prepare_raytracing_scene_bindings;
-use blas::{prepare_raytracing_blas, BlasManager};
 use extract::{extract_raytracing_scene, StandardMaterialAssets};
+use scene::{prepare_raytracing_meshes, SceneManager};
 use tracing::warn;
 
 /// Creates acceleration structures and binding arrays of resources for raytracing.
@@ -59,16 +60,17 @@ impl Plugin for RaytracingScenePlugin {
             .extra_buffer_usages |= BufferUsages::BLAS_INPUT | BufferUsages::STORAGE;
 
         render_app
-            .init_resource::<BlasManager>()
+            .init_resource::<SceneManager>()
             .init_resource::<StandardMaterialAssets>()
             .init_resource::<RaytracingSceneBindings>()
             .add_systems(ExtractSchedule, extract_raytracing_scene)
             .add_systems(
                 Render,
                 (
-                    prepare_raytracing_blas
+                    prepare_raytracing_meshes
                         .in_set(RenderSystems::PrepareAssets)
                         .before(prepare_assets::<RenderMesh>)
+                        .before(prepare_assets::<GpuImage>)
                         .after(allocate_and_free_meshes),
                     prepare_raytracing_scene_bindings.in_set(RenderSystems::PrepareBindGroups),
                 ),

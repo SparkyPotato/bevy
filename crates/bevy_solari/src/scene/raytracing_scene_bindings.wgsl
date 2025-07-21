@@ -44,6 +44,25 @@ struct Material {
 
 const TEXTURE_MAP_NONE = 0xFFFFFFFFu;
 
+struct SgLight {
+    pos: vec3<f32>,
+    variance: f32,
+    intensity: vec3<f32>,
+    _padding: u32,
+    axis: vec3<f32>,
+    sharpness: f32,
+}
+
+struct LightTreeNode {
+    left: SgLight,
+    right: SgLight,
+    // If indices are u32::MAX they are invalid.
+    // If indices have their MSB set, then the node is a leaf, with the index being the light id.
+    left_index: u32,
+    right_index: u32,
+    _padding: vec2<u32>,
+}
+
 struct LightSource {
     kind: u32, // 1 bit for kind, 31 bits for extra data
     id: u32,
@@ -70,9 +89,10 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(6) var<storage> transforms: array<mat4x4<f32>>;
 @group(0) @binding(7) var<storage> geometry_ids: array<InstanceGeometryIds>;
 @group(0) @binding(8) var<storage> material_ids: array<u32>; // TODO: Store material_id in instance_custom_index instead?
-@group(0) @binding(9) var<storage> light_sources: array<LightSource>;
-@group(0) @binding(10) var<storage> directional_lights: array<DirectionalLight>;
-@group(0) @binding(11) var<storage> previous_frame_light_id_translations: array<u32>;
+@group(0) @binding(9) var<storage> light_tree: array<LightTreeNode>;
+@group(0) @binding(10) var<storage> light_sources: array<LightSource>;
+@group(0) @binding(11) var<storage> directional_lights: array<DirectionalLight>;
+@group(0) @binding(12) var<storage> previous_frame_light_id_translations: array<u32>;
 
 const RAY_T_MIN = 0.01f;
 const RAY_T_MAX = 100000.0f;
