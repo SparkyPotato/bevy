@@ -88,6 +88,7 @@ impl NormalCone {
     }
 }
 
+#[derive(Clone)]
 pub struct MeshData {
     pub blas: Blas,
     pub aabb: Aabb,
@@ -110,10 +111,6 @@ pub struct SceneManager {
 impl SceneManager {
     pub fn get_mesh(&self, mesh: &AssetId<Mesh>) -> Option<&MeshData> {
         self.meshes.get(mesh)
-    }
-
-    pub fn get_blas(&self, mesh: &AssetId<Mesh>) -> Option<&Blas> {
-        self.get_mesh(mesh).map(|data| &data.blas)
     }
 
     pub fn get_material(&self, material: &AssetId<StandardMaterial>) -> Option<&MaterialData> {

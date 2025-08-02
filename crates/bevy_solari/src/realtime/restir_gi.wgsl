@@ -7,7 +7,7 @@
 #import bevy_pbr::utils::{rand_f, sample_uniform_hemisphere, sample_disk, octahedral_decode}
 #import bevy_render::maths::{PI, PI_2}
 #import bevy_render::view::View
-#import bevy_solari::sampling::{sample_random_light, trace_point_visibility}
+#import bevy_solari::sampling::{sample_with_light_tree, trace_point_visibility}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
@@ -101,11 +101,11 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     reservoir.confidence_weight = 1.0;
 
     let sample_point_diffuse_brdf = sample_point.material.base_color / PI;
-    let direct_lighting = sample_random_light(sample_point.world_position, sample_point.world_normal, rng);
+    let direct_lighting = sample_with_light_tree(sample_point.world_position, sample_point.world_normal, rng);
     reservoir.radiance = direct_lighting.radiance * sample_point_diffuse_brdf;
 
     let inverse_uniform_hemisphere_pdf = PI_2;
-    reservoir.unbiased_contribution_weight = direct_lighting.inverse_pdf * inverse_uniform_hemisphere_pdf;
+    reservoir.unbiased_contribution_weight = inverse_uniform_hemisphere_pdf;
 
     return reservoir;
 }

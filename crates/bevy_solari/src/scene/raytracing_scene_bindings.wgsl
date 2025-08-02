@@ -9,6 +9,7 @@ struct InstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
+    light_id: u32,
 }
 
 struct VertexBuffer { vertices: array<PackedVertex> }
@@ -99,9 +100,10 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(7) var<storage> geometry_ids: array<InstanceGeometryIds>;
 @group(0) @binding(8) var<storage> material_ids: array<u32>; // TODO: Store material_id in instance_custom_index instead?
 @group(0) @binding(9) var<storage> light_tree: array<LightTreeNode>;
-@group(0) @binding(10) var<storage> light_sources: array<LightSource>;
-@group(0) @binding(11) var<storage> directional_lights: array<DirectionalLight>;
-@group(0) @binding(12) var<storage> previous_frame_light_id_translations: array<u32>;
+@group(0) @binding(10) var<storage> light_tree_paths: array<u32>;
+@group(0) @binding(11) var<storage> light_sources: array<LightSource>;
+@group(0) @binding(12) var<storage> directional_lights: array<DirectionalLight>;
+@group(0) @binding(13) var<storage> previous_frame_light_id_translations: array<u32>;
 
 const RAY_T_MIN = 0.01f;
 const RAY_T_MAX = 100000.0f;
@@ -137,6 +139,7 @@ struct ResolvedRayHitFull {
     uv: vec2<f32>,
     triangle_area: f32,
     triangle_count: u32,
+    light_id: u32,
     material: ResolvedMaterial,
 }
 
@@ -214,5 +217,5 @@ fn resolve_triangle_data_full(instance_id: u32, triangle_id: u32, barycentrics: 
 
     let resolved_material = resolve_material(material, uv);
 
-    return ResolvedRayHitFull(world_position, world_normal, geometric_world_normal, world_tangent, uv, triangle_area, instance_geometry_ids.triangle_count, resolved_material);
+    return ResolvedRayHitFull(world_position, world_normal, geometric_world_normal, world_tangent, uv, triangle_area, instance_geometry_ids.triangle_count, instance_geometry_ids.light_id, resolved_material);
 }

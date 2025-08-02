@@ -3,12 +3,18 @@ mod extract;
 mod scene;
 mod types;
 
+use std::sync::mpmc::{channel, Receiver, Sender};
+
+use bevy_color::{ColorToComponents, LinearRgba};
+use bevy_gizmos::gizmos::Gizmos;
+use bevy_math::{Vec3, Vec3A};
+use bevy_transform::components::GlobalTransform;
 pub use binder::RaytracingSceneBindings;
 pub use types::RaytracingMesh3d;
 
-use crate::SolariPlugins;
-use bevy_app::{App, Plugin};
-use bevy_ecs::schedule::IntoScheduleConfigs;
+use crate::{scene::scene::MeshData, SolariPlugins};
+use bevy_app::{App, Plugin, Update};
+use bevy_ecs::{resource::Resource, schedule::IntoScheduleConfigs, system::Res};
 use bevy_render::{
     extract_resource::ExtractResourcePlugin,
     load_shader_library,
@@ -53,6 +59,10 @@ impl Plugin for RaytracingScenePlugin {
 
         app.add_plugins(ExtractResourcePlugin::<StandardMaterialAssets>::default());
 
+        let (send, recv) = channel();
+        app.insert_resource(SceneLightRecv(recv))
+            .add_systems(Update, debug_light_scene);
+
         let render_app = app.sub_app_mut(RenderApp);
 
         render_app
@@ -64,6 +74,7 @@ impl Plugin for RaytracingScenePlugin {
             .init_resource::<SceneManager>()
             .init_resource::<StandardMaterialAssets>()
             .init_resource::<RaytracingSceneBindings>()
+            .insert_resource(SceneLightSend(send))
             .add_systems(ExtractSchedule, extract_raytracing_scene)
             .add_systems(
                 Render,
@@ -76,5 +87,31 @@ impl Plugin for RaytracingScenePlugin {
                     prepare_raytracing_scene_bindings.in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
+    }
+}
+
+struct SceneLight {
+    transform: GlobalTransform,
+    average_emissive: Vec3,
+    mesh: MeshData,
+}
+#[derive(Resource)]
+struct SceneLightSend(Sender<Vec<SceneLight>>);
+#[derive(Resource)]
+struct SceneLightRecv(Receiver<Vec<SceneLight>>);
+
+fn debug_light_scene(mut gizmos: Gizmos, recv: Res<SceneLightRecv>) {
+    let Ok(lights) = recv.0.try_recv() else {
+        return;
+    };
+
+    for light in lights {
+        let start = light.mesh.aabb.center;
+        let end = start + Vec3A::from(light.mesh.normal_average);
+        gizmos.arrow(
+            light.transform.transform_point(start.into()),
+            light.transform.transform_point(end.into()),
+            LinearRgba::from_vec3(light.average_emissive),
+        );
     }
 }

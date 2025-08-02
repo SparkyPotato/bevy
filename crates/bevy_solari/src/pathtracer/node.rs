@@ -107,7 +107,7 @@ impl FromWorld for PathtracerNode {
                     texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                     texture_storage_2d(
                         ViewTarget::TEXTURE_FORMAT_HDR,
-                        StorageTextureAccess::WriteOnly,
+                        StorageTextureAccess::ReadWrite,
                     ),
                     uniform_buffer::<ViewUniform>(true),
                 ),

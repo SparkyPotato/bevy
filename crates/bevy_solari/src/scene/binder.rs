@@ -1,4 +1,4 @@
-use crate::scene::scene::NormalCone;
+use crate::scene::{scene::NormalCone, SceneLight, SceneLightSend};
 
 use super::{extract::StandardMaterialAssets, scene::SceneManager, RaytracingMesh3d};
 use bevy_asset::{AssetId, Handle};
@@ -57,6 +57,7 @@ pub fn prepare_raytracing_scene_bindings(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut raytracing_scene_bindings: ResMut<RaytracingSceneBindings>,
+    light_send: ResMut<SceneLightSend>,
 ) {
     raytracing_scene_bindings.bind_group = None;
 
@@ -87,6 +88,7 @@ pub fn prepare_raytracing_scene_bindings(
     let mut geometry_ids = StorageBufferList::<GpuInstanceGeometryIds>::default();
     let mut material_ids = StorageBufferList::<u32>::default();
     let mut light_tree = StorageBufferList::<GpuLightTreeNode>::default();
+    let mut light_tree_paths = StorageBufferList::<u32>::default();
     let mut light_sources = StorageBufferList::<GpuLightSource>::default();
     let mut directional_lights = StorageBufferList::<GpuDirectionalLight>::default();
     let mut previous_frame_light_id_translations = StorageBufferList::<u32>::default();
@@ -156,6 +158,7 @@ pub fn prepare_raytracing_scene_bindings(
     let mut instance_id = 0;
     let mut lights = Vec::new();
     let mut vmf_normals = Vec::new();
+    let mut lights_to_send = Vec::new();
     for (entity, mesh, material, transform) in &instances_query {
         let average_emissive = scene_manager
             .get_material(&material.id())
@@ -172,8 +175,9 @@ pub fn prepare_raytracing_scene_bindings(
             continue;
         };
 
+        let mut light_id = u32::MAX;
         if average_emissive != Vec3::ZERO {
-            let light_id = light_sources.get().len() as u32;
+            light_id = light_sources.get().len() as u32;
             vmf_normals.push(mesh.normal_average);
             lights.push(transform_light(
                 transform,
@@ -197,6 +201,12 @@ pub fn prepare_raytracing_scene_bindings(
             raytracing_scene_bindings
                 .previous_frame_light_entities
                 .push(entity);
+
+            lights_to_send.push(SceneLight {
+                transform: *transform,
+                average_emissive,
+                mesh: mesh.clone(),
+            })
         }
 
         let Some(material_id) = material_id_map.get(&material.id()).copied() else {
@@ -228,12 +238,15 @@ pub fn prepare_raytracing_scene_bindings(
             index_buffer_id,
             index_buffer_offset: index_slice.range.start,
             triangle_count: (index_slice.range.len() / 3) as u32,
+            light_id,
         });
 
         material_ids.get_mut().push(material_id);
 
         instance_id += 1;
     }
+
+    let _ = light_send.0.send(lights_to_send);
 
     if instance_id == 0 {
         return;
@@ -263,10 +276,8 @@ pub fn prepare_raytracing_scene_bindings(
         assert_eq!(root, 0, "Root of the light BVH should be 0");
     }
 
-    // TODO: Use this when we need PDFs for MIS.
-    // let mut mesh_paths = Vec::with_capacity(vmf_normals.len());
-    // mesh_paths.resize(vmf_normals.len(), 0);
-    // emissive_paths(&mut mesh_paths, light_tree.get(), 0, 0, 0);
+    light_tree_paths.get_mut().resize(vmf_normals.len(), 0);
+    emissive_paths(light_tree_paths.get_mut(), light_tree.get(), 0, 0, 0);
 
     for (entity, directional_light) in &directional_lights_query {
         let directional_lights = directional_lights.get_mut();
@@ -303,6 +314,7 @@ pub fn prepare_raytracing_scene_bindings(
     geometry_ids.write_buffer(&render_device, &render_queue);
     material_ids.write_buffer(&render_device, &render_queue);
     light_tree.write_buffer(&render_device, &render_queue);
+    light_tree_paths.write_buffer(&render_device, &render_queue);
     light_sources.write_buffer(&render_device, &render_queue);
     directional_lights.write_buffer(&render_device, &render_queue);
     previous_frame_light_id_translations.write_buffer(&render_device, &render_queue);
@@ -327,6 +339,7 @@ pub fn prepare_raytracing_scene_bindings(
             geometry_ids.binding().unwrap(),
             material_ids.binding().unwrap(),
             light_tree.binding().unwrap(),
+            light_tree_paths.binding().unwrap(),
             light_sources.binding().unwrap(),
             directional_lights.binding().unwrap(),
             previous_frame_light_id_translations.binding().unwrap(),
@@ -352,6 +365,7 @@ impl FromWorld for RaytracingSceneBindings {
                         sampler(SamplerBindingType::Filtering).count(MAX_TEXTURE_COUNT),
                         storage_buffer_read_only_sized(false, None),
                         acceleration_structure(),
+                        storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
@@ -409,6 +423,7 @@ struct GpuInstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
+    light_id: u32,
 }
 
 #[derive(ShaderType)]

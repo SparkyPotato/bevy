@@ -18,11 +18,11 @@ fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builti
     let tile_id = workgroup_id.x;
     var rng = (tile_id * 5782582u) + sample_index + constants.frame_index;
 
-    let sample = generate_random_light_sample(&rng);
+    // let sample = generate_random_light_sample(&rng);
 
-    let i = (tile_id * 1024u) + sample_index;
-    light_tile_samples[i] = sample.light_sample;
-    light_tile_resolved_samples[i] = pack_resolved_light_sample(sample.resolved_light_sample);
+    // let i = (tile_id * 1024u) + sample_index;
+    // light_tile_samples[i] = sample.light_sample;
+    // light_tile_resolved_samples[i] = pack_resolved_light_sample(sample.resolved_light_sample);
 }
 
 struct ResolvedLightSamplePacked {

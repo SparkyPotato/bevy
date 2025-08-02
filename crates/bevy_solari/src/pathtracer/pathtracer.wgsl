@@ -4,11 +4,11 @@
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::brdf::evaluate_brdf
-#import bevy_solari::sampling::{sample_random_light, sample_with_light_tree, random_light_pdf, sample_ggx_vndf, ggx_vndf_pdf, balance_heuristic, power_heuristic}
+#import bevy_solari::sampling::{sample_random_light, sample_with_light_tree, random_light_pdf, light_tree_pdf, sample_ggx_vndf, ggx_vndf_pdf, balance_heuristic, power_heuristic}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, ResolvedRayHitFull, RAY_T_MIN, RAY_T_MAX}
 
 @group(1) @binding(0) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
-@group(1) @binding(1) var view_output: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(1) var view_output: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(2) var<uniform> view: View;
 
 @compute @workgroup_size(8, 8, 1)
@@ -40,6 +40,7 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var p_bounce = 0.0;
     var bounce_was_perfect_reflection = true;
     var previous_normal = vec3(0.0);
+    var previous_origin = vec3(0.0);
     loop {
         let ray_hit = trace_ray(ray_origin, ray_direction, ray_t_min, RAY_T_MAX, RAY_FLAG_NONE);
         if ray_hit.kind != RAY_QUERY_INTERSECTION_NONE {
@@ -47,8 +48,8 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let wo = -ray_direction;
 
             var mis_weight = 1.0;
-            if !bounce_was_perfect_reflection {
-                let p_light = random_light_pdf(ray_hit);
+            if !bounce_was_perfect_reflection && any(ray_hit.material.emissive != vec3(0.0)) {
+                let p_light = light_tree_pdf(ray_hit, previous_origin, previous_normal);
                 mis_weight = power_heuristic(p_bounce, p_light);
             }
             radiance += mis_weight * throughput * ray_hit.material.emissive;
@@ -70,6 +71,7 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             ray_t_min = RAY_T_MIN;
             p_bounce = next_bounce.pdf;
             bounce_was_perfect_reflection = next_bounce.perfectly_specular_bounce;
+            previous_origin = ray_hit.world_position;
             previous_normal = ray_hit.world_normal;
 
             // Update throughput for next bounce
@@ -90,7 +92,8 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Accumulation over time via running average
     let new_color = mix(old_color.rgb, radiance, 1.0 / (old_color.a + 1.0));
     textureStore(accumulation_texture, global_id.xy, vec4(new_color, old_color.a + 1.0));
-    textureStore(view_output, global_id.xy, vec4(new_color, 1.0));
+    let old = textureLoad(view_output, global_id.xy);
+    textureStore(view_output, global_id.xy, vec4(old.xyz + new_color, 1.0));
 }
 
 struct NextBounce {

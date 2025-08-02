@@ -5,11 +5,11 @@
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
-#import bevy_pbr::utils::{rand_f, rand_range_u, octahedral_decode, sample_disk}
+#import bevy_pbr::utils::{rand_f, rand_range_u, rand_u, octahedral_decode, sample_disk}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
-#import bevy_solari::sampling::{LightSample, calculate_resolved_light_contribution, resolve_and_calculate_light_contribution, resolve_light_sample, trace_light_visibility}
+#import bevy_solari::sampling::{LightSample, calculate_resolved_light_contribution, resolve_light_sample, resolve_and_calculate_light_contribution, trace_light_visibility, sample_light_tree, resolve_light_tree_sample, GenerateRandomLightSampleResult, LightTreeSample, generate_light_tree_sample}
 #import bevy_solari::scene_bindings::{light_sources, previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
@@ -27,14 +27,13 @@
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
-const INITIAL_SAMPLES = 32u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 20.0;
 
 const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 
 @compute @workgroup_size(8, 8, 1)
-fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
+fn initial_and_temporal(@builtin(local_invocation_index) local_index: u32, @builtin(subgroup_size) subgroup_size: u32, @builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
@@ -51,7 +50,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
     let diffuse_brdf = base_color / PI;
 
-    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, workgroup_id.xy, &rng);
+    let initial_reservoir = generate_initial_reservoir(local_index, subgroup_size, world_position, world_normal, diffuse_brdf, &rng);
     let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_position, world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng);
 
@@ -92,36 +91,49 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
-    var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
-    let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+struct SeededLightTreeSample {
+    seed: u32,
+    sample: LightTreeSample
+}
+
+const INITIAL_SAMPLES = 8u;
+const SAMPLES_PER_THREAD = 2u;
+var<workgroup> shared_initial_samples: array<GenerateRandomLightSampleResult, 64u * SAMPLES_PER_THREAD>;
+
+fn generate_initial_reservoir(local_index: u32, subgroup_size: u32, world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
+    for (var i = 0u; i < SAMPLES_PER_THREAD; i++) {
+        let wave_sel = subgroupBroadcastFirst(rand_range_u(subgroup_size, rng));
+        let sel_world_pos = subgroupBroadcast(world_position, wave_sel);
+        let sel_world_normal = subgroupBroadcast(world_normal, wave_sel);
+        shared_initial_samples[local_index * SAMPLES_PER_THREAD + i] = generate_light_tree_sample(rng, world_position, world_normal);
+    }
+    workgroupBarrier();
 
     var reservoir = empty_reservoir();
     var weight_sum = 0.0;
     let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
-
     var reservoir_target_function = 0.0;
     var light_sample_world_position = vec4(0.0);
-    var selected_tile_sample = 0u;
+    var selected_sample: LightSample;
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
-        let tile_sample = light_tile_start + rand_range_u(1024u, rng);
-        let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
-        let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+        let id = rand_range_u(64u * SAMPLES_PER_THREAD, rng);
+        let light_sample = shared_initial_samples[id];
+        let light_contribution = calculate_resolved_light_contribution(light_sample.resolved_light_sample, world_position, world_normal);
 
         let target_function = luminance(light_contribution.radiance * diffuse_brdf);
-        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+        let resampling_weight = mis_weight * target_function * min(light_contribution.inverse_pdf, 10000.0);
 
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {
             reservoir_target_function = target_function;
-            light_sample_world_position = resolved_light_sample.world_position;
-            selected_tile_sample = tile_sample;
+            light_sample_world_position = light_sample.resolved_light_sample.world_position;
+            selected_sample = light_sample.light_sample;
         }
     }
 
     if reservoir_target_function != 0.0 {
-        reservoir.sample = light_tile_samples[selected_tile_sample];
+        reservoir.sample = selected_sample;
     }
 
     if reservoir_valid(reservoir) {
@@ -249,8 +261,12 @@ fn empty_reservoir() -> Reservoir {
     );
 }
 
+fn is_nan(v: vec3<f32>) -> bool {
+    return any(min(v, vec3(100000000000000000.0)) == vec3(100000000000000000.0));
+}
+
 fn reservoir_valid(reservoir: Reservoir) -> bool {
-    return reservoir.sample.light_id != NULL_RESERVOIR_SAMPLE;
+    return reservoir.sample.light_id != NULL_RESERVOIR_SAMPLE && !is_nan(vec3(reservoir.confidence_weight, reservoir.unbiased_contribution_weight, 0.0));
 }
 
 struct ReservoirMergeResult {
@@ -271,16 +287,18 @@ fn merge_reservoirs(
     let canonical_mis_weight = canonical_reservoir.confidence_weight * mis_weight_denominator;
     let canonical_target_function = reservoir_target_function(canonical_reservoir, world_position, world_normal, diffuse_brdf);
     let canonical_resampling_weight = canonical_mis_weight * (canonical_target_function.a * canonical_reservoir.unbiased_contribution_weight);
+    
+    if !reservoir_valid(other_reservoir) { return ReservoirMergeResult(canonical_reservoir, canonical_target_function.rgb); }
 
     let other_mis_weight = other_reservoir.confidence_weight * mis_weight_denominator;
     let other_target_function = reservoir_target_function(other_reservoir, world_position, world_normal, diffuse_brdf);
     let other_resampling_weight = other_mis_weight * (other_target_function.a * other_reservoir.unbiased_contribution_weight);
 
     let weight_sum = canonical_resampling_weight + other_resampling_weight;
-
+    
     var combined_reservoir = empty_reservoir();
     combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
-
+    
     if rand_f(rng) < other_resampling_weight / weight_sum {
         combined_reservoir.sample = other_reservoir.sample;
 
