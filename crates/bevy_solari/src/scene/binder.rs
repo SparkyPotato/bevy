@@ -120,13 +120,23 @@ pub fn prepare_raytracing_scene_bindings(
         let Some(emissive_texture_id) = process_texture(&material.emissive_texture) else {
             continue;
         };
+        let Some(metallic_roughness_texture_id) =
+            process_texture(&material.metallic_roughness_texture)
+        else {
+            continue;
+        };
 
         materials.get_mut().push(GpuMaterial {
-            base_color: material.base_color.to_linear(),
-            emissive: material.emissive,
-            base_color_texture_id,
             normal_map_texture_id,
+            base_color_texture_id,
             emissive_texture_id,
+            metallic_roughness_texture_id,
+
+            base_color: LinearRgba::from(material.base_color).to_vec3(),
+            perceptual_roughness: material.perceptual_roughness,
+            emissive: material.emissive.to_vec3(),
+            metallic: material.metallic,
+            reflectance: LinearRgba::from(material.specular_tint).to_vec3() * material.reflectance,
             _padding: Default::default(),
         });
 
@@ -217,6 +227,7 @@ pub fn prepare_raytracing_scene_bindings(
             vertex_buffer_offset: vertex_slice.range.start,
             index_buffer_id,
             index_buffer_offset: index_slice.range.start,
+            triangle_count: (index_slice.range.len() / 3) as u32,
         });
 
         material_ids.get_mut().push(material_id);
@@ -281,6 +292,10 @@ pub fn prepare_raytracing_scene_bindings(
         previous_frame_light_id_translations
             .get_mut()
             .push(current_frame_index);
+    }
+
+    if light_sources.get().len() > u16::MAX as usize {
+        panic!("Too many light sources in the scene, maximum is 65536.");
     }
 
     materials.write_buffer(&render_device, &render_queue);
@@ -393,16 +408,22 @@ struct GpuInstanceGeometryIds {
     vertex_buffer_offset: u32,
     index_buffer_id: u32,
     index_buffer_offset: u32,
+    triangle_count: u32,
 }
 
 #[derive(ShaderType)]
 struct GpuMaterial {
-    base_color: LinearRgba,
-    emissive: LinearRgba,
-    base_color_texture_id: u32,
     normal_map_texture_id: u32,
+    base_color_texture_id: u32,
     emissive_texture_id: u32,
-    _padding: u32,
+    metallic_roughness_texture_id: u32,
+
+    base_color: Vec3,
+    perceptual_roughness: f32,
+    emissive: Vec3,
+    metallic: f32,
+    reflectance: Vec3,
+    _padding: f32,
 }
 
 #[derive(ShaderType)]
@@ -413,6 +434,10 @@ struct GpuLightSource {
 
 impl GpuLightSource {
     fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32) -> GpuLightSource {
+        if triangle_count > u16::MAX as u32 {
+            panic!("Too many triangles ({triangle_count}) in an emissive mesh, maximum is 65535.");
+        }
+
         Self {
             kind: triangle_count << 1,
             id: instance_id,
