@@ -7,7 +7,7 @@ use std::sync::mpmc::{channel, Receiver, Sender};
 
 use bevy_color::{ColorToComponents, LinearRgba};
 use bevy_gizmos::gizmos::Gizmos;
-use bevy_math::{Vec3, Vec3A};
+use bevy_math::{Isometry3d, Vec3, Vec3A};
 use bevy_transform::components::GlobalTransform;
 pub use binder::RaytracingSceneBindings;
 pub use types::RaytracingMesh3d;
@@ -111,6 +111,12 @@ fn debug_light_scene(mut gizmos: Gizmos, recv: Res<SceneLightRecv>) {
         gizmos.arrow(
             light.transform.transform_point(start.into()),
             light.transform.transform_point(end.into()),
+            LinearRgba::from_vec3(light.average_emissive),
+        );
+        let (scale, rot, translation) = light.transform.to_scale_rotation_translation();
+        gizmos.rounded_cuboid(
+            Isometry3d::new(Vec3A::from(translation) + light.mesh.aabb.center, rot),
+            (light.mesh.aabb.half_extents * 2.0 * Vec3A::from(scale)).into(),
             LinearRgba::from_vec3(light.average_emissive),
         );
     }

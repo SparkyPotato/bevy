@@ -29,8 +29,8 @@ const DI_RESERVOIR_STRUCT_SIZE: u64 = 16;
 /// Size of the GI `Reservoir` shader struct in bytes.
 const GI_RESERVOIR_STRUCT_SIZE: u64 = 48;
 
-pub const LIGHT_TILE_BLOCKS: u64 = 128;
-pub const LIGHT_TILE_SAMPLES_PER_BLOCK: u64 = 1024;
+pub const LIGHT_TILE_SIZE: u32 = 32;
+pub const LIGHT_TILE_SAMPLES_PER_BLOCK: u64 = 512;
 
 /// Internal rendering resources used for Solari lighting.
 #[derive(Component)]
@@ -63,18 +63,21 @@ pub fn prepare_solari_lighting_resources(
             continue;
         }
 
+        let light_tile_count_x = view_size.x.div_ceil(LIGHT_TILE_SIZE);
+        let light_tile_count_y = view_size.y.div_ceil(LIGHT_TILE_SIZE);
+        let light_tile_sample_count =
+            (light_tile_count_x * light_tile_count_y) as u64 * LIGHT_TILE_SAMPLES_PER_BLOCK;
+
         let light_tile_samples = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_light_tile_samples"),
-            size: LIGHT_TILE_BLOCKS * LIGHT_TILE_SAMPLES_PER_BLOCK * LIGHT_SAMPLE_STRUCT_SIZE,
+            size: light_tile_sample_count * LIGHT_SAMPLE_STRUCT_SIZE,
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
         let light_tile_resolved_samples = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_light_tile_resolved_samples"),
-            size: LIGHT_TILE_BLOCKS
-                * LIGHT_TILE_SAMPLES_PER_BLOCK
-                * RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE,
+            size: light_tile_sample_count * RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE,
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });

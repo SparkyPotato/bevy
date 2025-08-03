@@ -1,8 +1,5 @@
-use super::{
-    prepare::{SolariLightingResources, LIGHT_TILE_BLOCKS},
-    SolariLighting,
-};
-use crate::scene::RaytracingSceneBindings;
+use super::{prepare::SolariLightingResources, SolariLighting};
+use crate::{realtime::prepare::LIGHT_TILE_SIZE, scene::RaytracingSceneBindings};
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_core_pipeline::prepass::{
     PreviousViewData, PreviousViewUniformOffset, PreviousViewUniforms, ViewPrepassTextures,
@@ -168,7 +165,11 @@ impl ViewNode for SolariLightingNode {
             0,
             bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
         );
-        pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
+        pass.dispatch_workgroups(
+            viewport.x.div_ceil(LIGHT_TILE_SIZE),
+            viewport.y.div_ceil(LIGHT_TILE_SIZE),
+            1,
+        );
 
         pass.set_pipeline(di_initial_and_temporal_pipeline);
         pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
