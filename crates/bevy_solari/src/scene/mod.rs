@@ -8,6 +8,7 @@ use std::sync::mpmc::{channel, Receiver, Sender};
 use bevy_color::{ColorToComponents, LinearRgba};
 use bevy_gizmos::gizmos::Gizmos;
 use bevy_math::{Isometry3d, Vec3, Vec3A};
+use bevy_shader::load_shader_library;
 use bevy_transform::components::GlobalTransform;
 pub use binder::RaytracingSceneBindings;
 pub use types::RaytracingMesh3d;
@@ -17,7 +18,6 @@ use bevy_app::{App, Plugin, Update};
 use bevy_ecs::{resource::Resource, schedule::IntoScheduleConfigs, system::Res};
 use bevy_render::{
     extract_resource::ExtractResourcePlugin,
-    load_shader_library,
     mesh::{
         allocator::{allocate_and_free_meshes, MeshAllocator},
         RenderMesh,
@@ -41,8 +41,6 @@ impl Plugin for RaytracingScenePlugin {
         load_shader_library!(app, "brdf.wgsl");
         load_shader_library!(app, "raytracing_scene_bindings.wgsl");
         load_shader_library!(app, "sampling.wgsl");
-
-        app.register_type::<RaytracingMesh3d>();
     }
 
     fn finish(&self, app: &mut App) {
