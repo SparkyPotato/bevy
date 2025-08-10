@@ -96,7 +96,7 @@ struct SeededLightTreeSample {
     sample: LightTreeSample
 }
 
-const INITIAL_SAMPLES = 16u;
+const INITIAL_SAMPLES = 2u;
 
 fn generate_initial_reservoir(global_id: vec2<u32>, world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
     let light_tile = global_id >> vec2(TILE_SIZE_BITS);
@@ -110,26 +110,31 @@ fn generate_initial_reservoir(global_id: vec2<u32>, world_position: vec3<f32>, w
 
     var reservoir_target_function = 0.0;
     var light_sample_world_position = vec4(0.0);
-    var selected_tile_sample = 0u;
+    // var selected_tile_sample = 0u;
+    var selected_sample = LightSample(0, 0);
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
-        let tile_sample = light_tile_start + rand_range_u(SAMPLES_PER_TILE, rng);
-        let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+        // let tile_sample = light_tile_start + rand_range_u(SAMPLES_PER_TILE, rng);
+        let sample = generate_light_tree_sample(rng, world_position, world_normal);
+        // let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+        let resolved_light_sample = sample.resolved_light_sample;
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
         let target_function = luminance(light_contribution.radiance * diffuse_brdf);
-        let resampling_weight = mis_weight * (target_function * min(light_contribution.inverse_pdf, 100000.0));
+        let resampling_weight = mis_weight * (target_function * min(light_contribution.inverse_pdf, 10000.0));
 
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {
             reservoir_target_function = target_function;
             light_sample_world_position = resolved_light_sample.world_position;
-            selected_tile_sample = tile_sample;
+            // selected_tile_sample = tile_sample;
+            selected_sample = sample.light_sample;
         }
     }
 
     if reservoir_target_function != 0.0 {
-        reservoir.sample = light_tile_samples[selected_tile_sample];
+        // reservoir.sample = light_tile_samples[selected_tile_sample];
+        reservoir.sample = selected_sample;
     }
 
     if reservoir_valid(reservoir) {

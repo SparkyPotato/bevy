@@ -224,34 +224,32 @@ struct LightTreeSample {
 }
 
 fn sample_light_tree(rng_sample: f32, ray_origin: vec3<f32>, ray_origin_world_normal: vec3<f32>) -> LightTreeSample {
-    for (var t = 0u; t < 2u; t++) {
-        var p = rng_sample;
-        var node = light_tree[0];
-        var pdf = 1.0;
-        for (var i = 0u; i < 32u; i++) {
-            var left_w = weight_light(node.left, ray_origin, ray_origin_world_normal);
-            var right_w = weight_light(node.right, ray_origin, ray_origin_world_normal);
-            var w_sum = left_w + right_w;
-            if w_sum < 0.000001 {
-                break;
+    var p = rng_sample;
+    var node = light_tree[0];
+    var pdf = 1.0;
+    for (var i = 0u; i < 32u; i++) {
+        var left_w = weight_light(node.left, ray_origin, ray_origin_world_normal);
+        var right_w = weight_light(node.right, ray_origin, ray_origin_world_normal);
+        var w_sum = left_w + right_w;
+        if w_sum < 0.000001 {
+            break;
+        }
+        let left_p = left_w / w_sum;
+        let right_p = 1.0 - left_p;
+        if p < left_p {
+            pdf *= left_p;
+            if node.left_index >> 31u == 1u {
+                return LightTreeSample(node.left_index & ~(1u << 31u), 1.0 / pdf);
             }
-            let left_p = left_w / w_sum;
-            let right_p = 1.0 - left_p;
-            if p < left_p {
-                pdf *= left_p;
-                if node.left_index >> 31u == 1u {
-                    return LightTreeSample(node.left_index & ~(1u << 31u), 1.0 / pdf);
-                }
-                node = light_tree[node.left_index];
-                p /= left_p;
-            } else {
-                pdf *= right_p;
-                if node.right_index >> 31u == 1u {
-                    return LightTreeSample(node.right_index & ~(1u << 31u), 1.0 / pdf);
-                }
-                node = light_tree[node.right_index];
-                p = (p - left_p) / right_p;
+            node = light_tree[node.left_index];
+            p /= left_p;
+        } else {
+            pdf *= right_p;
+            if node.right_index >> 31u == 1u {
+                return LightTreeSample(node.right_index & ~(1u << 31u), 1.0 / pdf);
             }
+            node = light_tree[node.right_index];
+            p = (p - left_p) / right_p;
         }
     }
     let light_count = f32(arrayLength(&light_sources));
@@ -267,33 +265,29 @@ fn light_tree_sample_pdf(light_id: u32, ray_origin: vec3<f32>, ray_origin_world_
         let left_w = weight_light(node.left, ray_origin, ray_origin_world_normal);
         let right_w = weight_light(node.right, ray_origin, ray_origin_world_normal);
         let w_sum = left_w + right_w;
-        if w_sum < 0.0001 {
-            return 1.0;
+        if w_sum < 0.000001 {
+            break;
         }
         let left_p = left_w / w_sum;
         let right_p = 1.0 - left_p;
         if (path & 1) == 0 {
             pdf *= left_p;
-            if node.left_index == ~0u {
-                return 1.0;
-            } else if node.left_index >> 31u == 1u {
+            if node.left_index >> 31u == 1u {
                 return pdf;
             }
             node = light_tree[node.left_index];
             path >>= 1;
         } else {
             pdf *= right_p;
-            if node.right_index == ~0u {
-                return 1.0;
-            } else if node.right_index >> 31u == 1u {
+            if node.right_index >> 31u == 1u {
                 return pdf;
             }
             node = light_tree[node.right_index];
             path >>= 1;
         }
     }
-    return 1.0;
-
+    let light_count = f32(arrayLength(&light_sources));
+    return 1.0 / light_count;
 }
 
 // https://github.com/yusuketokuyoshi/VSGL/blob/master/VSGL/Shaders/LightingPS.hlsl

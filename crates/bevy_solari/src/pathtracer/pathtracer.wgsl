@@ -92,8 +92,7 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Accumulation over time via running average
     let new_color = mix(old_color.rgb, radiance, 1.0 / (old_color.a + 1.0));
     textureStore(accumulation_texture, global_id.xy, vec4(new_color, old_color.a + 1.0));
-    let old = textureLoad(view_output, global_id.xy);
-    textureStore(view_output, global_id.xy, vec4(old.xyz + new_color, 1.0));
+    textureStore(view_output, global_id.xy, vec4(new_color, 1.0));
 }
 
 struct NextBounce {

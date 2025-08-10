@@ -157,7 +157,6 @@ pub fn prepare_raytracing_scene_bindings(
 
     let mut instance_id = 0;
     let mut lights = Vec::new();
-    let mut vmf_normals = Vec::new();
     let mut lights_to_send = Vec::new();
     for (entity, mesh, material, transform) in &instances_query {
         let average_emissive = scene_manager
@@ -178,12 +177,12 @@ pub fn prepare_raytracing_scene_bindings(
         let mut light_id = u32::MAX;
         if average_emissive != Vec3::ZERO {
             light_id = light_sources.get().len() as u32;
-            vmf_normals.push(mesh.normal_average);
             lights.push(transform_light(
                 transform,
                 BuildLight {
                     aabb: mesh.aabb,
                     power: average_emissive * mesh.area * PI,
+                    average_normal: mesh.normal_average,
                     cone: mesh.normal_cone,
                     left: u32::MAX,
                     right: light_id,
@@ -263,7 +262,7 @@ pub fn prepare_raytracing_scene_bindings(
     } else if lights.len() == 1 {
         let light = lights[0];
         light_tree.get_mut().push(GpuLightTreeNode {
-            left: leaf_sg_light(light, &vmf_normals),
+            left: leaf_sg_light(light),
             right: GpuSgLight::default(),
             left_index: light.right | (1 << 31),
             right_index: u32::MAX,
@@ -272,11 +271,11 @@ pub fn prepare_raytracing_scene_bindings(
     } else {
         let mut indices: Vec<_> = (0..lights.len() as u32).collect();
         let root = build_bvh(&mut lights, &mut indices);
-        let root = build_gpu_bvh(light_tree.get_mut(), &lights, &vmf_normals, root);
+        let root = build_gpu_bvh(light_tree.get_mut(), &lights, root);
         assert_eq!(root, 0, "Root of the light BVH should be 0");
     }
 
-    light_tree_paths.get_mut().resize(vmf_normals.len(), 0);
+    light_tree_paths.get_mut().resize(lights.len(), 0);
     emissive_paths(light_tree_paths.get_mut(), light_tree.get(), 0, 0, 0);
 
     for (entity, directional_light) in &directional_lights_query {
@@ -501,6 +500,7 @@ fn tlas_transform(transform: &Mat4) -> [f32; 12] {
 struct BuildLight {
     aabb: Aabb,
     power: Vec3,
+    average_normal: Vec3,
     cone: NormalCone,
     // If nodes, both are indices into the list.
     // If leaves, left is u32::MAX, and right is mesh light id.
@@ -536,12 +536,15 @@ fn transform_light(t: &GlobalTransform, mut light: BuildLight) -> BuildLight {
 }
 
 fn merge_lights(left: BuildLight, right: BuildLight) -> BuildLight {
+    let w_left = luminance(left.power) / luminance(left.power + right.power);
+    let w_right = 1.0 - w_left;
     BuildLight {
         aabb: Aabb::from_min_max(
             left.aabb.min().min(right.aabb.min()).into(),
             left.aabb.max().max(right.aabb.max()).into(),
         ),
         power: left.power + right.power,
+        average_normal: left.average_normal * w_left + right.average_normal * w_right,
         cone: left.cone.merge(right.cone),
         left: left.left,
         right: right.right,
@@ -702,9 +705,9 @@ fn power_to_intensity(power: Vec3, sharpness: f32) -> Vec3 {
     power / (2.0 * PI * sg_integral(sharpness))
 }
 
-fn leaf_sg_light(light: BuildLight, meshes: &[Vec3]) -> GpuSgLight {
+fn leaf_sg_light(light: BuildLight) -> GpuSgLight {
     debug_assert_eq!(light.left, u32::MAX);
-    let (axis, sharpness) = axis_to_vmf(meshes[light.right as usize]);
+    let (axis, sharpness) = axis_to_vmf(light.average_normal);
     let variance = 0.5 * light.aabb.half_extents.length_squared();
     GpuSgLight {
         pos: light.aabb.center.into(),
@@ -719,14 +722,13 @@ fn leaf_sg_light(light: BuildLight, meshes: &[Vec3]) -> GpuSgLight {
 fn handle_child(
     out: &mut Vec<GpuLightTreeNode>,
     bvh: &[BuildLight],
-    meshes: &[Vec3],
     node: u32,
 ) -> (GpuSgLight, u32) {
     let n = bvh[node as usize];
     if n.left == u32::MAX {
-        (leaf_sg_light(n, meshes), n.right | (1 << 31))
+        (leaf_sg_light(n), n.right | (1 << 31))
     } else {
-        let child_id = build_gpu_bvh(out, bvh, meshes, node);
+        let child_id = build_gpu_bvh(out, bvh, node);
         let child = &out[child_id as usize];
 
         let left_lum = luminance(bvh[n.left as usize].power);
@@ -734,16 +736,15 @@ fn handle_child(
         let w_left = left_lum / (left_lum + right_lum);
         let w_right = 1.0 - w_left;
 
+        let pos = child.left.pos * w_left + child.right.pos * w_right;
         let variance = child.left.variance * w_left
             + child.right.variance * w_right
             + w_left * w_right * (child.left.pos - child.right.pos).length_squared();
-
-        let axis_avg = child.left.axis * w_left + child.right.axis * w_right;
-        let (axis, sharpness) = axis_to_vmf(axis_avg);
+        let (axis, sharpness) = axis_to_vmf(n.average_normal);
 
         (
             GpuSgLight {
-                pos: child.left.pos * w_left + child.right.pos * w_right,
+                pos,
                 variance,
                 intensity: power_to_intensity(n.power, sharpness),
                 _padding: 0,
@@ -755,17 +756,12 @@ fn handle_child(
     }
 }
 
-fn build_gpu_bvh(
-    out: &mut Vec<GpuLightTreeNode>,
-    bvh: &[BuildLight],
-    meshes: &[Vec3],
-    node: u32,
-) -> u32 {
+fn build_gpu_bvh(out: &mut Vec<GpuLightTreeNode>, bvh: &[BuildLight], node: u32) -> u32 {
     let us_index = out.len();
     let us = &bvh[node as usize];
     out.push(GpuLightTreeNode::default());
-    let left = handle_child(out, bvh, meshes, us.left);
-    let right = handle_child(out, bvh, meshes, us.right);
+    let left = handle_child(out, bvh, us.left);
+    let right = handle_child(out, bvh, us.right);
     let out = &mut out[us_index];
     (out.left, out.left_index) = left;
     (out.right, out.right_index) = right;
