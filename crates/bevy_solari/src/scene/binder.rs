@@ -26,11 +26,20 @@ const MAX_TEXTURE_COUNT: NonZeroU32 = NonZeroU32::new(5_000).unwrap();
 const TEXTURE_MAP_NONE: u32 = u32::MAX;
 const LIGHT_NOT_PRESENT_THIS_FRAME: u32 = u32::MAX;
 
+/// Amount of entries in the light cache (must be a power of 2, and >= 2^10)
+pub const LIGHT_CACHE_SIZE: u64 = 2u64.pow(20);
+/// This should match the size of `LightCacheCellRead` and `LightCacheCellWrite` in
+/// `light_cache.wgsl`!
+const LIGHT_CACHE_CELL_SIZE: u64 = size_of::<[u32; 17]>() as _;
+
 #[derive(Resource)]
 pub struct RaytracingSceneBindings {
     pub bind_group: Option<BindGroup>,
     pub bind_group_layout: BindGroupLayout,
+    light_cache_checksums: [Buffer; 2],
+    light_cache_cells: [Buffer; 2],
     previous_frame_light_entities: Vec<Entity>,
+    read_index: usize,
 }
 
 pub fn prepare_raytracing_scene_bindings(
@@ -256,29 +265,53 @@ pub fn prepare_raytracing_scene_bindings(
     command_encoder.build_acceleration_structures(&[], [&tlas]);
     render_queue.submit([command_encoder.finish()]);
 
-    raytracing_scene_bindings.bind_group = Some(render_device.create_bind_group(
-        "raytracing_scene_bind_group",
-        &raytracing_scene_bindings.bind_group_layout,
-        &BindGroupEntries::sequential((
-            vertex_buffers.as_slice(),
-            index_buffers.as_slice(),
-            textures.as_slice(),
-            samplers.as_slice(),
-            materials.binding().unwrap(),
-            tlas.as_binding(),
-            transforms.binding().unwrap(),
-            geometry_ids.binding().unwrap(),
-            material_ids.binding().unwrap(),
-            light_sources.binding().unwrap(),
-            directional_lights.binding().unwrap(),
-            previous_frame_light_id_translations.binding().unwrap(),
-        )),
-    ));
+    raytracing_scene_bindings.bind_group = Some(
+        render_device.create_bind_group(
+            "raytracing_scene_bind_group",
+            &raytracing_scene_bindings.bind_group_layout,
+            &BindGroupEntries::sequential((
+                vertex_buffers.as_slice(),
+                index_buffers.as_slice(),
+                textures.as_slice(),
+                samplers.as_slice(),
+                materials.binding().unwrap(),
+                tlas.as_binding(),
+                transforms.binding().unwrap(),
+                geometry_ids.binding().unwrap(),
+                material_ids.binding().unwrap(),
+                light_sources.binding().unwrap(),
+                directional_lights.binding().unwrap(),
+                previous_frame_light_id_translations.binding().unwrap(),
+                raytracing_scene_bindings.light_cache_checksums
+                    [raytracing_scene_bindings.read_index]
+                    .as_entire_binding(),
+                raytracing_scene_bindings.light_cache_checksums
+                    [raytracing_scene_bindings.read_index ^ 1]
+                    .as_entire_binding(),
+                raytracing_scene_bindings.light_cache_cells[raytracing_scene_bindings.read_index]
+                    .as_entire_binding(),
+                raytracing_scene_bindings.light_cache_cells
+                    [raytracing_scene_bindings.read_index ^ 1]
+                    .as_entire_binding(),
+            )),
+        ),
+    );
+
+    raytracing_scene_bindings.read_index ^= 1;
 }
 
 impl FromWorld for RaytracingSceneBindings {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+
+        let buffer = |label: &str, cell_size: u64| {
+            render_device.create_buffer(&BufferDescriptor {
+                label: Some(label),
+                size: LIGHT_CACHE_SIZE * cell_size,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
 
         Self {
             bind_group: None,
@@ -300,9 +333,22 @@ impl FromWorld for RaytracingSceneBindings {
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
+                        storage_buffer_read_only_sized(false, None),
+                        storage_buffer_sized(false, None),
+                        storage_buffer_read_only_sized(false, None),
+                        storage_buffer_sized(false, None),
                     ),
                 ),
             ),
+            light_cache_checksums: [
+                buffer("raytracing_light_cache_checksums_a", size_of::<u32>() as _),
+                buffer("raytracing_light_cache_checksums_b", size_of::<u32>() as _),
+            ],
+            light_cache_cells: [
+                buffer("raytracing_light_cache_cells_a", LIGHT_CACHE_CELL_SIZE),
+                buffer("raytracing_light_cache_cells_b", LIGHT_CACHE_CELL_SIZE),
+            ],
+            read_index: 0,
             previous_frame_light_entities: Vec::new(),
         }
     }

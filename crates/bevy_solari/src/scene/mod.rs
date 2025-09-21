@@ -4,7 +4,7 @@ mod extract;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::RaytracingSceneBindings;
+pub use binder::{RaytracingSceneBindings, LIGHT_CACHE_SIZE};
 pub use types::RaytracingMesh3d;
 
 use crate::SolariPlugins;
@@ -33,6 +33,7 @@ impl Plugin for RaytracingScenePlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "brdf.wgsl");
         load_shader_library!(app, "raytracing_scene_bindings.wgsl");
+        load_shader_library!(app, "light_cache.wgsl");
         load_shader_library!(app, "sampling.wgsl");
     }
 

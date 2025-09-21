@@ -1,5 +1,5 @@
 use super::{prepare::PathtracerAccumulationTexture, Pathtracer};
-use crate::scene::RaytracingSceneBindings;
+use crate::scene::{RaytracingSceneBindings, LIGHT_CACHE_SIZE};
 use bevy_asset::load_embedded_asset;
 use bevy_ecs::{
     query::QueryItem,
@@ -17,6 +17,7 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice},
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
+use bevy_shader::ShaderDefVal;
 use bevy_utils::default;
 
 pub mod graph {
@@ -121,6 +122,10 @@ impl FromWorld for PathtracerNode {
                 bind_group_layout.clone(),
             ],
             shader: load_embedded_asset!(world, "pathtracer.wgsl"),
+            shader_defs: vec![ShaderDefVal::UInt(
+                "LIGHT_CACHE_SIZE".into(),
+                LIGHT_CACHE_SIZE as u32,
+            )],
             ..default()
         });
 

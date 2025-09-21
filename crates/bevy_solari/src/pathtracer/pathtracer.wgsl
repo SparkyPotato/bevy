@@ -4,8 +4,9 @@
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::brdf::evaluate_brdf
-#import bevy_solari::sampling::{sample_random_light, random_light_pdf, sample_ggx_vndf, ggx_vndf_pdf, balance_heuristic, power_heuristic}
+#import bevy_solari::sampling::{random_light_contribution, hit_random_light_pdf, sample_ggx_vndf, ggx_vndf_pdf, balance_heuristic, power_heuristic}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, ResolvedRayHitFull, RAY_T_MIN, RAY_T_MAX}
+#import bevy_solari::light_cache::{query_light_cache, evaluate_lighting_from_cache, write_light_cache}
 
 @group(1) @binding(0) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
 @group(1) @binding(1) var view_output: texture_storage_2d<rgba16float, write>;
@@ -48,19 +49,33 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
             var mis_weight = 1.0;
             if !bounce_was_perfect_reflection {
-                let p_light = random_light_pdf(ray_hit);
-                mis_weight = power_heuristic(p_bounce, p_light);
+                if pixel_uv.x < 0.5 {
+                    mis_weight = 0.0;
+                } else {
+                    let p_light = hit_random_light_pdf(ray_hit);
+                    mis_weight = power_heuristic(p_bounce, p_light);
+                }
             }
             radiance += mis_weight * throughput * ray_hit.material.emissive;
 
             // Sample direct lighting, but only if the surface is not mirror-like
             let is_perfectly_specular = ray_hit.material.roughness < 0.0001 && ray_hit.material.metallic > 0.9999;
             if !is_perfectly_specular {
-                let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, &rng);
-                let pdf_of_bounce = brdf_pdf(wo, direct_lighting.wi, ray_hit);
-                mis_weight = power_heuristic(1.0 / direct_lighting.inverse_pdf, pdf_of_bounce);
-                let direct_lighting_brdf = evaluate_brdf(ray_hit.world_normal, wo, direct_lighting.wi, ray_hit.material);
-                radiance += mis_weight * throughput * direct_lighting.radiance * direct_lighting.inverse_pdf * direct_lighting_brdf;
+                if pixel_uv.x < 0.5 {
+                    var light_cache_cell = query_light_cache(ray_hit.world_position, view.world_position);
+                    let direct_lighting = evaluate_lighting_from_cache(
+                        &rng, &light_cache_cell, ray_hit.world_position, ray_hit.world_normal, wo, ray_hit.material, view.exposure
+                    );
+                    write_light_cache(light_cache_cell, ray_hit.world_position, view.world_position);
+                    radiance += throughput * direct_lighting.radiance * direct_lighting.inverse_pdf;
+                } else {
+                    let direct_lighting = random_light_contribution(&rng, ray_hit.world_position, ray_hit.world_normal);
+                    let pdf_of_bounce = brdf_pdf(wo, direct_lighting.wi, ray_hit);
+                    let brdf = evaluate_brdf(ray_hit.world_normal, wo, direct_lighting.wi, ray_hit.material);
+
+                    mis_weight = power_heuristic(1.0 / direct_lighting.inverse_pdf, pdf_of_bounce);
+                    radiance += mis_weight * throughput * direct_lighting.radiance * direct_lighting.inverse_pdf * brdf;
+                }
             }
 
             // Sample new ray direction from the material BRDF for next bounce

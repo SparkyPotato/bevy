@@ -8,18 +8,18 @@
 #import bevy_render::view::View
 #import bevy_solari::sampling::{sample_random_light, trace_point_visibility}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
-#import bevy_solari::world_cache::query_world_cache
+#import bevy_solari::light_cache::{query_light_cache, evaluate_lighting_from_cache, write_light_cache}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
-@group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<Reservoir>;
-@group(1) @binding(6) var<storage, read_write> gi_reservoirs_b: array<Reservoir>;
-@group(1) @binding(7) var gbuffer: texture_2d<u32>;
-@group(1) @binding(8) var depth_buffer: texture_depth_2d;
-@group(1) @binding(9) var motion_vectors: texture_2d<f32>;
-@group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
-@group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
-@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(1) var<storage, read_write> gi_reservoirs_a: array<Reservoir>;
+@group(1) @binding(2) var<storage, read_write> gi_reservoirs_b: array<Reservoir>;
+@group(1) @binding(3) var gbuffer: texture_2d<u32>;
+@group(1) @binding(4) var depth_buffer: texture_depth_2d;
+@group(1) @binding(5) var motion_vectors: texture_2d<f32>;
+@group(1) @binding(6) var previous_gbuffer: texture_2d<u32>;
+@group(1) @binding(7) var previous_depth_buffer: texture_depth_2d;
+@group(1) @binding(8) var<uniform> view: View;
+@group(1) @binding(9) var<uniform> previous_view: PreviousViewUniforms;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -106,18 +106,14 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     reservoir.sample_point_world_position = sample_point.world_position;
     reservoir.sample_point_world_normal = sample_point.world_normal;
     reservoir.confidence_weight = 1.0;
+    
+    let wo = normalize(view.world_position - sample_point.world_position);
+    var light_cache_cell = query_light_cache(sample_point.world_position, view.world_position);
+    let direct_lighting = evaluate_lighting_from_cache(rng, &light_cache_cell, sample_point.world_position, sample_point.world_normal, wo, sample_point.material, view.exposure);
+    write_light_cache(light_cache_cell, sample_point.world_position, view.world_position);
 
-#ifdef NO_WORLD_CACHE
-    let direct_lighting = sample_random_light(sample_point.world_position, sample_point.world_normal, rng);
     reservoir.radiance = direct_lighting.radiance;
     reservoir.unbiased_contribution_weight = direct_lighting.inverse_pdf * uniform_hemisphere_inverse_pdf();
-#else
-    reservoir.radiance = query_world_cache(sample_point.world_position, sample_point.geometric_world_normal, view.world_position);
-    reservoir.unbiased_contribution_weight = uniform_hemisphere_inverse_pdf();
-#endif
-
-    let sample_point_diffuse_brdf = sample_point.material.base_color / PI;
-    reservoir.radiance *= sample_point_diffuse_brdf;
 
     return reservoir;
 }
