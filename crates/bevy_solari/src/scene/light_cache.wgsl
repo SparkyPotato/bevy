@@ -99,13 +99,12 @@ fn evaluate_lighting_from_cache(
     let cell_selected_weight = cell_selected_light.weight + log2(exposure);
     let cell_confidence = smoothstep(0.1, 0.3, cell_selected_weight);
 
-    // Sample more lights if our cell has bad lights
+    // Sample more random lights if our cell has bad lights
     let random_sample_count = u32(round(mix(8.0, 2.0, cell_confidence)));
     let random_selected_light = select_light_randomly(rng, world_position, world_normal, wo, material, random_sample_count);
-    let p_random_candidate = p_wrs(random_selected_light) * f32(random_sample_count) / select_random_light_inverse_pdf(random_selected_light.light);
 
     let p_cell_selection = select(p_wrs(cell_selected_light), 0.0, cell_selected_light.weight_sum < 0.0001);
-    let p_random_selection = select(p_random_candidate, 0.0, random_selected_light.weight_sum < 0.0001);
+    let p_random_selection = select(p_wrs(random_selected_light), 0.0, random_selected_light.weight_sum < 0.0001);
     let p_random_selection_clamped = min(mix(1.0, 0.25 * p_cell_selection, cell_confidence), p_random_selection);
 
     let weight_sum = p_cell_selection + p_random_selection_clamped;
@@ -137,10 +136,11 @@ struct SelectedLight {
     light: u32,
     weight: f32,
     weight_sum: f32,
+    base_pdf: f32,
 }
 
 fn p_wrs(selection: SelectedLight) -> f32 {
-    return selection.weight / selection.weight_sum;
+    return (selection.weight / selection.weight_sum) * selection.base_pdf;
 }
 
 fn select_light_from_cache_cell(
@@ -177,7 +177,7 @@ fn select_light_from_cache_cell(
             p = (p - prob) / (1.0 - prob);
         }
     }
-    return SelectedLight(selected, selected_weight, weight_sum);
+    return SelectedLight(selected, selected_weight, weight_sum, 1.0);
 }
 
 fn select_light_randomly(
@@ -211,7 +211,8 @@ fn select_light_randomly(
             p = (p - prob) / (1.0 - prob);
         }
     }
-    return SelectedLight(selected, selected_weight, weight_sum);
+    let base_pdf = f32(samples) / select_random_light_inverse_pdf(selected);
+    return SelectedLight(selected, selected_weight, weight_sum, base_pdf);
 }
 
 fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>) -> f32 {
