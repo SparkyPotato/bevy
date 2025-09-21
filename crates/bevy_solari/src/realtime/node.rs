@@ -1,7 +1,7 @@
 use super::{prepare::SolariLightingResources, SolariLighting};
 use crate::scene::{RaytracingSceneBindings, LIGHT_CACHE_SIZE};
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-use bevy_anti_aliasing::dlss::ViewDlssRayReconstructionTextures;
+use bevy_anti_alias::dlss::ViewDlssRayReconstructionTextures;
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_core_pipeline::prepass::{
     PreviousViewData, PreviousViewUniformOffset, PreviousViewUniforms, ViewPrepassTextures,
