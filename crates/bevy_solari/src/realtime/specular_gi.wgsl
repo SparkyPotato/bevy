@@ -11,7 +11,7 @@
 #import bevy_solari::realtime_bindings::{view_output, gi_reservoirs_a, gbuffer, depth_buffer, view, constants}
 
 const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
-const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
+const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0144;
 const TERMINATE_IN_WORLD_CACHE_THRESHOLD: f32 = 0.03;
 
 @compute @workgroup_size(8, 8, 1)
