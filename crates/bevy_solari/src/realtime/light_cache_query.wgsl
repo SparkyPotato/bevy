@@ -3,13 +3,28 @@
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::utils::{rand_f, rand_vec2f, rand_range_u, rand_u}
 #import bevy_solari::brdf::evaluate_brdf
+#import bevy_solari::gbuffer_utils::{gpixel_resolve, pixel_dissimilar}
 #import bevy_solari::scene_bindings::{light_sources, LIGHT_SOURCE_KIND_DIRECTIONAL, ResolvedMaterial}
 #import bevy_solari::sampling::{calculate_resolved_light_contribution, resolve_and_calculate_light_contribution, resolve_light_sample, trace_light_visibility, LightSample}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
-#import bevy_solari::realtime_bindings::{light_tile_samples, light_tile_resolved_samples, motion_vectors, light_cache, view, constants, WeightedLight, LightCacheCell}
+#import bevy_solari::realtime_bindings::{
+    light_tile_samples, 
+    light_tile_resolved_samples,
+    gbuffer,
+    depth_buffer,
+    motion_vectors, 
+    previous_gbuffer, 
+    previous_depth_buffer, 
+    light_cache, 
+    view,
+    previous_view,
+    constants, 
+    WeightedLight, 
+    LightCacheCell
+}
 
 /// Lights searched that aren't in the cell
-const LIGHT_CACHE_NEW_LIGHTS_SEARCH_COUNT_MIN: u32 = 4u;
+const LIGHT_CACHE_NEW_LIGHTS_SEARCH_COUNT_MIN: u32 = 2u;
 const LIGHT_CACHE_NEW_LIGHTS_SEARCH_COUNT_MAX: u32 = 8u;
 const LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO: f32 = 0.25;
 const LIGHT_CACHE_CELL_CONFIDENCE_LUM_MIN: f32 = 0.1;
@@ -21,14 +36,24 @@ fn load_light_cache_cell(rng: ptr<function, u32>, pixel_id: vec2<u32>) -> LightC
         return LightCacheCell(0u, array<WeightedLight, #{LIGHT_CACHE_LIGHTS_PER_CELL}>());
     }
 
+    let depth = textureLoad(depth_buffer, pixel_id, 0);
+    let surface = gpixel_resolve(textureLoad(gbuffer, pixel_id, 0), depth, pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
     let pixel_id_float = vec2<f32>(pixel_id);
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     var sel_pixel_id_float = round(pixel_id_float - motion_vector * view.main_pass_viewport.zw);
 
-    // If off-screen, fall back to current pixel
+    // If off-screen or pixel is drastically different, fall back to current pixel
     if any(sel_pixel_id_float < vec2(0.0)) || any(sel_pixel_id_float >= view.main_pass_viewport.zw) {
         sel_pixel_id_float = pixel_id_float;
     }
+    // } else {
+    //     let pixel_id = vec2<u32>(sel_pixel_id_float);
+    //     let temporal_depth = textureLoad(previous_depth_buffer, pixel_id, 0);
+    //     let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, pixel_id, 0), temporal_depth, pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
+    //     if pixel_dissimilar(depth, surface.world_position, temporal_surface.world_position, surface.world_normal, temporal_surface.world_normal, view) {
+    //         sel_pixel_id_float = pixel_id_float;
+    //     }
+    // }
 
     let cell_id_float = sel_pixel_id_float / 8.0;
     let bilinear_weights = fract(cell_id_float) - 0.5;
@@ -55,55 +80,67 @@ fn load_light_cache_cell(rng: ptr<function, u32>, pixel_id: vec2<u32>) -> LightC
 
 var<workgroup> weighted_lights: array<u64, 64>;
 
-fn write_light_cache_cell(pixel_id: vec2<u32>, subgroup_invoc_id: u32, subgroup_id: u32, subgroup_size: u32, light: WeightedLight) {
-    weighted_lights[subgroup_id * subgroup_size + subgroup_invoc_id] = 0;
+fn write_light_cache_cell(pixel_id: vec2<u32>, local_index: u32, light: WeightedLight) {
+    let data = u64(bitcast<u32>(max(light.weight, 0.0))) << 32u | u64(light.light);
+    weighted_lights[local_index] = data;
     workgroupBarrier();
 
-    var data = u64(bitcast<u32>(light.weight)) << 32u | u64(light.light);
-    let base = subgroup_id * 8u;
-    for (var i = 0u; i < 8u; i++) {
-        let best = subgroupMax(data);
-        if best == data {
-            weighted_lights[base + i] = best;
-            data = 0;
-        }
-    }
-    workgroupBarrier();
-
-    if subgroup_size >= 64u || subgroup_id != 0u {
+    if local_index >= 32 {
         return;
     }
 
-    data = weighted_lights[subgroup_invoc_id];
-    for (var i = 0u; i < 8u; i++) {
-        let best = subgroupMax(data);
-        if best == data {
-            weighted_lights[i] = best;
-            data = 0;
+    for (var i = 0u; i < 64u; i++) {
+        var a = local_index * 2 + 1;
+        var b = a + 1;
+        if weighted_lights[a] < weighted_lights[b] {
+            let temp = weighted_lights[a];
+            weighted_lights[a] = weighted_lights[b];
+            weighted_lights[b] = temp;
         }
+        workgroupBarrier();
+
+        a = local_index * 2;
+        b = a + 1;
+        if weighted_lights[a] < weighted_lights[b] {
+            let temp = weighted_lights[a];
+            weighted_lights[a] = weighted_lights[b];
+            weighted_lights[b] = temp;
+        }
+        workgroupBarrier();
     }
-    subgroupBarrier();
+    if local_index != 0u {
+        return;
+    }
 
-    if subgroup_invoc_id < 8u {
-        let packed = weighted_lights[subgroup_invoc_id];
-        let weight = bitcast<f32>(u32(packed >> 32u));
-        let light = u32(packed);
-        let data = WeightedLight(light, weight);
-
-        let comp_count = countOneBits(subgroupBallot(weight > 0.0));
-        let count = comp_count.x + comp_count.y + comp_count.z + comp_count.w;
-        let cell_id = pixel_id >> vec2(3u);
-        let max_cell = vec2<u32>(view.main_pass_viewport.zw) >> vec2(3u);
-        let cell_index = cell_id.x + cell_id.y * (max_cell.x + 1u);
-
-        if subgroup_invoc_id < count {
-            light_cache[cell_index].visible_lights[subgroup_invoc_id] = data;
-            if subgroup_invoc_id == 0u {
-                light_cache[cell_index].visible_light_count = count;
+    var light_count = 0u;
+    var lights: array<WeightedLight, #{LIGHT_CACHE_LIGHTS_PER_CELL}>;
+    for (var i = 0u; i < 64; i++) {
+        let data = weighted_lights[i];
+        let light = u32(data);
+        let weight = bitcast<f32>(u32(data >> 32u));
+        var already_exists = false;
+        for (var j = 0u; j < #{LIGHT_CACHE_LIGHTS_PER_CELL}; j++) {
+            if light == lights[j].light {
+                already_exists = true;
+                break;
             }
         }
+        if already_exists {
+            continue;
+        }
+
+        if weight > LIGHT_CACHE_CELL_CONFIDENCE_LUM_MIN && light_count < #{LIGHT_CACHE_LIGHTS_PER_CELL} {
+            lights[light_count] = WeightedLight(light, weight);
+            light_count += 1u;
+        } else {
+            break;
+        }
     }
-    
+
+    let cell_id = pixel_id >> vec2(3u);
+    let max_cell = vec2<u32>(view.main_pass_viewport.zw) >> vec2(3u);
+    let cell_index = cell_id.x + cell_id.y * (max_cell.x + 1u);
+    light_cache[cell_index] = LightCacheCell(light_count, lights);
 }
 
 struct EvaluatedLighting {
