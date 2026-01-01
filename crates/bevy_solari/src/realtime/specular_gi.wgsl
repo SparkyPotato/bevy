@@ -11,7 +11,7 @@
 #import bevy_solari::realtime_bindings::{view_output, gi_reservoirs_a, gbuffer, depth_buffer, view, constants}
 
 const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
-const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
+const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0;
 const TERMINATE_IN_WORLD_CACHE_THRESHOLD: f32 = 0.03;
 
 @compute @workgroup_size(8, 8, 1)
@@ -140,7 +140,7 @@ fn emissive_mis_weight(i: u32, initial_roughness: f32, p_bounce: f32, ray_hit: R
         return power_heuristic(p_bounce, p_light);
     } else {
         // The first bounce gets MIS weight 0.0 or 1.0 depending on if ReSTIR DI shaded using the specular lobe or not
-        if initial_roughness <= SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
+        if initial_roughness < SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
             return 1.0;
         } else {
             return 0.0;

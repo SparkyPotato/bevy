@@ -2,7 +2,7 @@ use super::{
     prepare::{SolariLightingResources, LIGHT_TILE_BLOCKS, WORLD_CACHE_SIZE},
     SolariLighting,
 };
-use crate::scene::RaytracingSceneBindings;
+use crate::{realtime::prepare::LIGHT_CACHE_LIGHTS_PER_CELL, scene::RaytracingSceneBindings};
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 use bevy_anti_alias::dlss::ViewDlssRayReconstructionTextures;
 use bevy_asset::{load_embedded_asset, Handle};
@@ -194,6 +194,7 @@ impl ViewNode for SolariLightingNode {
                 s.world_cache_b.as_entire_binding(),
                 s.world_cache_active_cell_indices.as_entire_binding(),
                 s.world_cache_active_cells_count.as_entire_binding(),
+                s.light_cache.as_entire_binding(),
             )),
         );
         let bind_group_world_cache_active_cells_dispatch =
@@ -392,6 +393,7 @@ impl FromWorld for SolariLightingNode {
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
                 ),
             ),
         );
@@ -431,10 +433,13 @@ impl FromWorld for SolariLightingNode {
                 layout.push(extra_bind_group_layout.clone());
             }
 
-            let mut shader_defs = vec![ShaderDefVal::UInt(
-                "WORLD_CACHE_SIZE".into(),
-                WORLD_CACHE_SIZE as u32,
-            )];
+            let mut shader_defs = vec![
+                ShaderDefVal::UInt("WORLD_CACHE_SIZE".into(), WORLD_CACHE_SIZE as u32),
+                ShaderDefVal::UInt(
+                    "LIGHT_CACHE_LIGHTS_PER_CELL".into(),
+                    LIGHT_CACHE_LIGHTS_PER_CELL as u32,
+                ),
+            ];
             shader_defs.extend_from_slice(&extra_shader_defs);
 
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
