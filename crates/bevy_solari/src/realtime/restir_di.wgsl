@@ -12,7 +12,7 @@
 #import bevy_solari::sampling::{LightSample, calculate_resolved_light_contribution, resolve_and_calculate_light_contribution, resolve_light_sample, trace_light_visibility, balance_heuristic}
 #import bevy_solari::scene_bindings::{previous_frame_light_id_translations, ResolvedMaterial, LIGHT_NOT_PRESENT_THIS_FRAME}
 #import bevy_solari::specular_gi::SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD
-#import bevy_solari::light_cache_query::{load_light_cache_cell, evaluate_lighting, write_light_cache_cell}
+#import bevy_solari::light_cache_query::evaluate_lighting
 #import bevy_solari::realtime_bindings::{view_output, light_tile_samples, light_tile_resolved_samples, di_reservoirs_a, di_reservoirs_b, gbuffer, depth_buffer, motion_vectors, previous_gbuffer, previous_depth_buffer, view, previous_view, constants, ResolvedLightSamplePacked}
 
 const INITIAL_SAMPLES = 8u;
@@ -36,7 +36,8 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>, @bu
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
     let wo = normalize(view.world_position - surface.world_position);
 
-    let initial_reservoir = generate_initial_reservoir(global_id.xy, local_index, surface.world_position, surface.world_normal, wo, surface.material, &rng);
+    let lighting = evaluate_lighting(&rng, global_id.xy, local_index, surface.world_position, surface.world_normal, wo, surface.material);
+    let initial_reservoir =  Reservoir(lighting.light_sample, 1.0, lighting.inverse_pdf);
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(
         initial_reservoir, surface.world_position, surface.world_normal, wo, surface.material,
@@ -99,13 +100,6 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>, @built
     pixel_color += surface.material.emissive;
     pixel_color *= view.exposure;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
-}
-
-fn generate_initial_reservoir(pixel_id: vec2<u32>, local_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, rng: ptr<function, u32>) -> Reservoir {
-    let cell = load_light_cache_cell(rng, pixel_id);
-    let lighting = evaluate_lighting(rng, cell, world_position, world_normal, wo, material, view.exposure);
-    write_light_cache_cell(pixel_id, local_index, lighting.data);
-    return Reservoir(lighting.light_sample, 1.0, lighting.inverse_pdf);
 }
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {

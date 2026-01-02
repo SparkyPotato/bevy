@@ -26,14 +26,24 @@
 /// Lights searched that aren't in the cell
 const LIGHT_CACHE_NEW_LIGHTS_SEARCH_COUNT_MIN: u32 = 2u;
 const LIGHT_CACHE_NEW_LIGHTS_SEARCH_COUNT_MAX: u32 = 8u;
-const LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO: f32 = 0.25;
+const LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO_MIN: f32 = 0.25;
+const LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO_MAX: f32 = 1.0;
 const LIGHT_CACHE_CELL_CONFIDENCE_LUM_MIN: f32 = 0.1;
 const LIGHT_CACHE_CELL_CONFIDENCE_LUM_MAX: f32 = 0.3;
 
-fn load_light_cache_cell(rng: ptr<function, u32>, pixel_id: vec2<u32>) -> LightCacheCell {
+struct LoadedCell {
+    cell: LightCacheCell,
+    exploratory_sample_ratio: f32,
+}
+
+fn empty_cell() -> LightCacheCell {
+    return LightCacheCell(0u, array<WeightedLight, #{LIGHT_CACHE_LIGHTS_PER_CELL}>());
+}
+
+fn load_light_cache_cell(rng: ptr<function, u32>, pixel_id: vec2<u32>) -> LoadedCell {
     // If reset, clear all history
     if bool(constants.reset) {
-        return LightCacheCell(0u, array<WeightedLight, #{LIGHT_CACHE_LIGHTS_PER_CELL}>());
+        return LoadedCell(empty_cell(), LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO_MAX);
     }
 
     let depth = textureLoad(depth_buffer, pixel_id, 0);
@@ -41,19 +51,20 @@ fn load_light_cache_cell(rng: ptr<function, u32>, pixel_id: vec2<u32>) -> LightC
     let pixel_id_float = vec2<f32>(pixel_id);
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     var sel_pixel_id_float = round(pixel_id_float - motion_vector * view.main_pass_viewport.zw);
+    var exploratory_sample_ratio = LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO_MIN;
 
     // If off-screen or pixel is drastically different, fall back to current pixel
     if any(sel_pixel_id_float < vec2(0.0)) || any(sel_pixel_id_float >= view.main_pass_viewport.zw) {
         sel_pixel_id_float = pixel_id_float;
+        exploratory_sample_ratio = LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO_MAX;
+    } else {
+        let pixel_id = vec2<u32>(sel_pixel_id_float);
+        let temporal_depth = textureLoad(previous_depth_buffer, pixel_id, 0);
+        let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, pixel_id, 0), temporal_depth, pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
+        if pixel_dissimilar(depth, surface.world_position, temporal_surface.world_position, surface.world_normal, temporal_surface.world_normal, view) {
+            exploratory_sample_ratio = LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO_MAX;
+        }
     }
-    // } else {
-    //     let pixel_id = vec2<u32>(sel_pixel_id_float);
-    //     let temporal_depth = textureLoad(previous_depth_buffer, pixel_id, 0);
-    //     let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, pixel_id, 0), temporal_depth, pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
-    //     if pixel_dissimilar(depth, surface.world_position, temporal_surface.world_position, surface.world_normal, temporal_surface.world_normal, view) {
-    //         sel_pixel_id_float = pixel_id_float;
-    //     }
-    // }
 
     let cell_id_float = sel_pixel_id_float / 8.0;
     let bilinear_weights = fract(cell_id_float) - 0.5;
@@ -73,9 +84,9 @@ fn load_light_cache_cell(rng: ptr<function, u32>, pixel_id: vec2<u32>) -> LightC
     if cell.visible_light_count == 0u && any(lerp_offset != vec2(0.0)) {
         let base_cell_index = vec2<u32>(base_cell_id);
         let base_cell_index_flat = base_cell_index.x + base_cell_index.y * (max_cell.x + 1u);
-        return light_cache[base_cell_index_flat];
+        return LoadedCell(light_cache[base_cell_index_flat], LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO_MAX);
     }
-    return cell;
+    return LoadedCell(cell, exploratory_sample_ratio);
 }
 
 var<workgroup> weighted_lights: array<u64, 64>;
@@ -147,22 +158,26 @@ struct EvaluatedLighting {
     light_sample: LightSample,
     radiance: vec3<f32>,
     inverse_pdf: f32,
-    data: WeightedLight,
     wi: vec3<f32>,
     brdf_rays_can_hit: bool,
 }
 
 fn evaluate_lighting(
-    rng: ptr<function, u32>, 
-    cell: LightCacheCell,
+    rng: ptr<function, u32>,
+    pixel_id: vec2<u32>,
+    local_index: u32,
     world_position: vec3<f32>,
     world_normal: vec3<f32>,
     wo: vec3<f32>,
     material: ResolvedMaterial,
-    exposure: f32,
 ) -> EvaluatedLighting {
+    let loaded_cell = load_light_cache_cell(rng, pixel_id);
+    let cell = loaded_cell.cell;
+    let exploratory_sample_ratio = loaded_cell.exploratory_sample_ratio;
+    let exposure = view.exposure;
+
     let cell_selected_light = select_light_cell(rng, cell, world_position, world_normal, wo, material);
-    let exposure_weighted_cell = log2((exp2(cell_selected_light.weight) - 1.0) * exposure + 1.0);
+    let exposure_weighted_cell = log2(cell_selected_light.linear_target_function * exposure + 1.0);
     let cell_confidence = smoothstep(LIGHT_CACHE_CELL_CONFIDENCE_LUM_MIN, LIGHT_CACHE_CELL_CONFIDENCE_LUM_MAX, exposure_weighted_cell);
 
     // Sample more random lights if our cell has bad lights
@@ -171,11 +186,11 @@ fn evaluate_lighting(
 
 
     let cell_weight = cell_selected_light.weight_sum;
-    let random_weight = min(mix(random_selected_light.weight_sum, LIGHT_CACHE_EXPLORATORY_SAMPLE_RATIO * cell_weight, cell_confidence), random_selected_light.weight_sum);
+    let random_weight = min(mix(random_selected_light.weight_sum, exploratory_sample_ratio * cell_weight, cell_confidence), random_selected_light.weight_sum);
     let weight_sum = cell_weight + random_weight;
 
     if weight_sum < 0.0001 {
-        return EvaluatedLighting(LightSample(0, 0), vec3(0.0), 0.0, WeightedLight(0, 0.0), vec3(0.0), false);
+        return EvaluatedLighting(LightSample(0, 0), vec3(0.0), 0.0, vec3(0.0), false);
     }
 
     var sel = cell_selected_light.light;
@@ -187,7 +202,6 @@ fn evaluate_lighting(
         ucw = weight_sum * random_selected_light.inverse_target_function;
     }
 
-    // TODO: reuse the eval that we did for light selection somehow
     let light_sample = LightSample(sel, rand_u(rng));
     let resolved_light_sample = resolve_light_sample(light_sample);
     let direct_lighting = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
@@ -195,13 +209,17 @@ fn evaluate_lighting(
     let visibility = trace_light_visibility(world_position, resolved_light_sample.world_position);
     let radiance = direct_lighting.radiance * brdf;
     let inverse_pdf = ucw * direct_lighting.inverse_pdf * visibility;
-    return EvaluatedLighting(light_sample, radiance, inverse_pdf, WeightedLight(sel, sel_weight * visibility), direct_lighting.wi, direct_lighting.brdf_rays_can_hit);
+    let data = WeightedLight(sel, sel_weight * visibility);
+    write_light_cache_cell(pixel_id, local_index, data);
+
+    return EvaluatedLighting(light_sample, radiance, inverse_pdf, direct_lighting.wi, direct_lighting.brdf_rays_can_hit);
 }
 
 struct SelectedLight {
     light: u32,
     weight: f32,
     inverse_target_function: f32,
+    linear_target_function: f32,
     weight_sum: f32,
 }
 
@@ -218,6 +236,7 @@ fn select_light_cell(
     let mis_weight = 1.0 / f32(cell.visible_light_count);
     var selected = 0u;
     var selected_target_function = 0.0;
+    var selected_linear_target_function = 0.0;
     var selected_weight = 0.0;
     var weight_sum = 0.0;
     // WRS to select the light based on unshadowed contribution
@@ -225,7 +244,8 @@ fn select_light_cell(
         let light_id = cell.visible_lights[i].light;
         let light_contribution = resolve_and_calculate_light_contribution(LightSample(light_id, rand_u(rng)), world_position, world_normal);
         let brdf = evaluate_brdf(world_normal, wo, light_contribution.wi, material);
-        let target_function = log2(luminance(light_contribution.radiance * brdf) + 1.0);
+        let linear_target_function = luminance(light_contribution.radiance * brdf);
+        let target_function = log2(linear_target_function + 1.0);
 
         let weight = mis_weight * target_function * light_contribution.inverse_pdf;
         weight_sum += weight;
@@ -234,6 +254,7 @@ fn select_light_cell(
         if p < prob {
             selected = light_id;
             selected_target_function = target_function;
+            selected_linear_target_function = linear_target_function;
             selected_weight = weight;
             p /= prob;
         } else {
@@ -242,7 +263,7 @@ fn select_light_cell(
     }
 
     let inverse_target_function = select(0.0, 1.0 / selected_target_function, selected_target_function > 0.0);
-    return SelectedLight(selected, selected_weight, inverse_target_function, weight_sum);
+    return SelectedLight(selected, selected_weight, inverse_target_function, selected_linear_target_function, weight_sum);
 }
 
 fn select_light_random(
@@ -260,6 +281,7 @@ fn select_light_random(
     let mis_weight = 1.0 / f32(samples);
     var selected = 0u;
     var selected_target_function = 0.0;
+    var selected_linear_target_function = 0.0;
     var selected_weight = 0.0;
     var weight_sum = 0.0;
     for (var i = 0u; i < samples; i++) {
@@ -270,7 +292,8 @@ fn select_light_random(
         let sample = unpack_resolved_light_sample(tile_sample);
         let light_contribution = calculate_resolved_light_contribution(sample, world_position, world_normal);
         let brdf = evaluate_brdf(world_normal, wo, light_contribution.wi, material);
-        let target_function = log2(luminance(light_contribution.radiance * brdf) + 1.0);
+        let linear_target_function = luminance(light_contribution.radiance * brdf);
+        let target_function = log2(linear_target_function + 1.0);
 
         let weight = mis_weight * target_function * light_contribution.inverse_pdf;
         weight_sum += weight;
@@ -279,6 +302,7 @@ fn select_light_random(
         if p < prob {
             selected = light_id;
             selected_target_function = target_function;
+            selected_linear_target_function = linear_target_function;
             selected_weight = weight;
             p /= prob;
         } else {
@@ -287,5 +311,5 @@ fn select_light_random(
     }
 
     let inverse_target_function = select(0.0, 1.0 / selected_target_function, selected_target_function > 0.0);
-    return SelectedLight(selected, selected_weight, inverse_target_function, weight_sum);
+    return SelectedLight(selected, selected_weight, inverse_target_function, selected_linear_target_function, weight_sum);
 }
